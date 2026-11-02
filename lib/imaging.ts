@@ -64,29 +64,70 @@ export async function startCamera(opts: { facingMode?: "environment" | "user"; d
 }
 
 /** Grab the sharpest available frame: ImageCapture still if possible, else the video frame. */
-export async function captureFrame(video: HTMLVideoElement, track?: MediaStreamTrack): Promise<HTMLCanvasElement> {
-  type ImageCaptureCtor = new (t: MediaStreamTrack) => { takePhoto: () => Promise<Blob> };
-  const IC = (window as unknown as { ImageCapture?: ImageCaptureCtor }).ImageCapture;
-  if (IC && track) {
-    try {
-      const cap = new IC(track);
-      const blob = await cap.takePhoto();
-      const bmp = await createImageBitmap(blob);
-      return canvasFromImage(bmp);
-    } catch {
-      /* fall through to video frame */
-    }
-  }
-  const w = video.videoWidth || 1920;
-  const h = video.videoHeight || 1080;
-  return canvasFromImage({ width: w, height: h, close: undefined } as unknown as ImageBitmap);
+/** True when a canvas is essentially a single flat colour (a failed grab). */
+export function frameHasContent(canvas: HTMLCanvasElement): boolean {
+  return !isFlat(canvas);
 }
 
-export function videoFrameCanvas(video: HTMLVideoElement): HTMLCanvasElement {
+function isFlat(canvas: HTMLCanvasElement): boolean {
   const c = document.createElement("canvas");
-  c.width = video.videoWidth || 1920;
-  c.height = video.videoHeight || 1080;
+  c.width = 32;
+  c.height = 32;
   const ctx = c.getContext("2d", { alpha: false })!;
+  ctx.drawImage(canvas, 0, 0, 32, 32);
+  const d = ctx.getImageData(0, 0, 32, 32).data;
+  let min = 255;
+  let max = 0;
+  for (let i = 0; i < d.length; i += 4) {
+    const l = (d[i] + d[i + 1] + d[i + 2]) / 3;
+    if (l < min) min = l;
+    if (l > max) max = l;
+  }
+  return max - min < 3;
+}
+
+/**
+ * Grab the current camera frame.
+ *
+ * Order of preference:
+ *  1. `ImageCapture.takePhoto()` — full sensor resolution, sharpest text.
+ *  2. The `<video>` element — always works, but capped to the preview resolution.
+ *
+ * Both results are validated: a flat/black result means the grab failed, so we
+ * fall back instead of silently handing the user a black page.
+ */
+export async function captureFrame(
+  video: HTMLVideoElement,
+  track?: MediaStreamTrack,
+  maxSide = 2600
+): Promise<HTMLCanvasElement> {
+  type ImageCaptureCtor = new (t: MediaStreamTrack) => { takePhoto: () => Promise<Blob> };
+  const IC = (window as unknown as { ImageCapture?: ImageCaptureCtor }).ImageCapture;
+  if (IC && track && track.readyState === "live") {
+    try {
+      const blob = await new IC(track).takePhoto();
+      if (blob && blob.size > 0) {
+        const bmp = await createImageBitmap(blob);
+        const canvas = canvasFromImage(bmp, maxSide);
+        bmp.close?.();
+        if (!isFlat(canvas)) return canvas;
+      }
+    } catch {
+      /* fall through to the video frame */
+    }
+  }
+  return videoFrameCanvas(video, maxSide);
+}
+
+export function videoFrameCanvas(video: HTMLVideoElement, maxSide = 2600): HTMLCanvasElement {
+  const vw = video.videoWidth || 1920;
+  const vh = video.videoHeight || 1080;
+  const scale = Math.min(1, maxSide / Math.max(vw, vh));
+  const c = document.createElement("canvas");
+  c.width = Math.max(1, Math.round(vw * scale));
+  c.height = Math.max(1, Math.round(vh * scale));
+  const ctx = c.getContext("2d", { alpha: false })!;
+  ctx.imageSmoothingQuality = "high";
   ctx.drawImage(video, 0, 0, c.width, c.height);
   return c;
 }
@@ -377,6 +418,47 @@ export function warpPerspective(
 }
 
 /* ----------------------------------------------------------------- filters */
+
+/**
+ * Downscale a canvas into a fresh one (never mutates the source).
+ * Used for cheap on-screen previews instead of re-encoding full-res bitmaps.
+ */
+export function downscaleCopy(source: HTMLCanvasElement, maxSide = 900): HTMLCanvasElement {
+  const scale = Math.min(1, maxSide / Math.max(source.width, source.height));
+  const c = document.createElement("canvas");
+  c.width = Math.max(1, Math.round(source.width * scale));
+  c.height = Math.max(1, Math.round(source.height * scale));
+  const ctx = c.getContext("2d", { alpha: false })!;
+  ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(source, 0, 0, c.width, c.height);
+  return c;
+}
+
+/**
+ * Apply a look to a copy, leaving `source` untouched.
+ * Filters are always derived from the pristine capture, so switching between
+ * them is idempotent — B&W can never destroy the colour data.
+ */
+export function applyScanFilterToCopy(source: HTMLCanvasElement, filter: ScanFilter): HTMLCanvasElement {
+  return applyScanFilter(downscaleCopy(source, Math.max(source.width, source.height)), filter);
+}
+
+/**
+ * Small JPEG data-URL of `source` with `filter` applied.
+ * Filtering happens *after* downscaling, so this costs a few milliseconds even
+ * for a 12-megapixel capture.
+ */
+export function filteredPreviewUrl(
+  source: HTMLCanvasElement,
+  filter: ScanFilter,
+  maxSide = 900,
+  quality = 0.85
+): string {
+  const small = downscaleCopy(source, maxSide);
+  applyScanFilter(small, filter);
+  return small.toDataURL("image/jpeg", quality);
+}
+
 
 /** Apply one of the scan looks in place. */
 export function applyScanFilter(canvas: HTMLCanvasElement, filter: ScanFilter): HTMLCanvasElement {

@@ -105,7 +105,7 @@ export function Modal({
       <div className="absolute inset-0 animate-fade bg-black/70 backdrop-blur-[3px]" onClick={onClose} />
       <div
         className={clsx(
-          "animate-pop relative z-10 flex max-h-[94dvh] w-full flex-col overflow-hidden rounded-t-2xl border border-line2 bg-panel shadow-2xl sm:rounded-2xl",
+          "animate-pop relative z-10 flex max-h-[94dvh] w-full min-w-0 flex-col overflow-hidden rounded-t-2xl border border-line2 bg-panel shadow-2xl sm:rounded-2xl",
           width
         )}
       >
@@ -118,7 +118,7 @@ export function Modal({
             <X size={17} />
           </IconButton>
         </div>
-        <div className={clsx("scroll-thin min-h-0 flex-1 overflow-y-auto", bare ? "" : "p-5")}>{children}</div>
+        <div className={clsx("scroll-thin min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden", bare ? "" : "p-5")}>{children}</div>
         {footer ? <div className="border-t border-line bg-panel px-5 py-3.5">{footer}</div> : null}
       </div>
     </div>

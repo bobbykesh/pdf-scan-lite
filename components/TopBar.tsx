@@ -10,6 +10,7 @@ import {
   ImagePlus,
   Loader2,
   Menu,
+  FileArchive,
   MoreHorizontal,
   PanelLeftClose,
   PanelLeftOpen,
@@ -41,6 +42,7 @@ export default function TopBar({
   const fileRef = useRef<HTMLInputElement | null>(null);
   const [menu, setMenu] = useState(false);
   const [ocrBusy, setOcrBusy] = useState(false);
+  const [ocrPct, setOcrPct] = useState(0);
   const menuRef = useRef<HTMLDivElement | null>(null);
 
   const hasPages = store.pages.length > 0;
@@ -82,11 +84,18 @@ export default function TopBar({
   const runOcr = async () => {
     if (!store.pages.length || ocrBusy) return;
     setOcrBusy(true);
+    setOcrPct(0);
     try {
       const pending = store.pages.filter((p) => !p.ocr || p.ocrState === "error");
       const targets = pending.length ? pending : store.pages;
       await runOcrBatch(targets, {
-        onProgress: (done, total, status) => shell.setBusy(`OCR ${done}/${total} · ${status}`),
+        onProgress: (done, total, status) => {
+          const m = /(\d+)%/.exec(status);
+          const within = m ? Number(m[1]) : 0;
+          const overall = Math.min(99, Math.round(((done + within / 100) / Math.max(1, total)) * 100));
+          setOcrPct((prev) => Math.max(prev, overall));
+          shell.setBusy(`OCR ${done + 1}/${total} · ${status}`);
+        },
         onPageDone: (pageId, result) => {
           store.setPageOcr(pageId, result, "done");
         },
@@ -99,6 +108,7 @@ export default function TopBar({
       shell.toast("OCR failed. Check your connection for the language data.", "err");
     } finally {
       setOcrBusy(false);
+      setOcrPct(0);
       shell.setBusy(null);
     }
   };
@@ -197,9 +207,22 @@ export default function TopBar({
             title="Recognise text on every page (runs locally)"
           >
             {ocrBusy ? <Loader2 size={15} className="animate-spin" /> : <ScanText size={15} />}
-            {ocrBusy ? "Recognising…" : ocrCount === store.pages.length && ocrCount > 0 ? "Text ready" : "OCR"}
+            {ocrBusy
+              ? `Recognising ${ocrPct}%`
+              : ocrCount === store.pages.length && ocrCount > 0
+                ? "Text ready"
+                : "OCR"}
           </Button>
         ) : null}
+
+        <IconButton
+          label="Compress & resize"
+          className="hidden sm:grid"
+          onClick={() => shell.open("compress")}
+          disabled={!hasPages}
+        >
+          <FileArchive size={17} />
+        </IconButton>
 
         <Button variant="primary" size="md" onClick={() => shell.open("export")} disabled={!hasPages}>
           <Download size={15} />
@@ -235,7 +258,7 @@ export default function TopBar({
                   },
                   {
                     icon: <Download size={15} />,
-                    label: "Compress & resize",
+                    label: "Compress & resize (advanced)",
                     action: () => shell.open("compress"),
                     show: hasPages,
                   },
