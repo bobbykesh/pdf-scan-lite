@@ -47,6 +47,7 @@ function Workspace() {
   const [modal, setModal] = useState<ModalKind>(null);
   const [payload, setPayload] = useState<unknown>(null);
   const [toasts, setToasts] = useState<Toast[]>([]);
+
   const [busy, setBusy] = useState<string | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   useEffect(() => {
@@ -62,6 +63,14 @@ function Workspace() {
     setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4200);
   }, []);
 
+  // The service worker announces when the offline cache is complete.
+  useEffect(() => {
+    const onReady = () =>
+      toast("Saved for offline use — the scanner now works without a signal.", "ok");
+    window.addEventListener("pdfsl:offline-ready", onReady);
+    return () => window.removeEventListener("pdfsl:offline-ready", onReady);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   const open = useCallback((m: ModalKind, p?: unknown) => {
     setPayload(p ?? null);
     setModal(m);

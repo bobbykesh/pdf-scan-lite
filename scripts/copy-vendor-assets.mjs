@@ -9,7 +9,7 @@
  *                            fully offline OCR. Without it tesseract.js lazily
  *                            downloads language data from jsDelivr on first use.
  */
-import { cpSync, existsSync, mkdirSync, copyFileSync, readdirSync, rmSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, copyFileSync, readdirSync, rmSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -91,6 +91,34 @@ if (wantsLangs) {
     await writeFile(dest, Buffer.from(await res.arrayBuffer()));
     console.log(`[assets] vendor/tessdata/${lang}.traineddata`);
   }
+}
+
+// 5) Emit an offline manifest so the service worker knows exactly which files
+//    make the app fully self-contained (this list is what gets precached).
+{
+  const { writeFileSync } = await import("node:fs");
+  const OFFLINE_DIRS = ["cmaps", "standard_fonts", "pdf-wasm", "vendor/tesseract", "vendor/tessdata"];
+  const urls = [];
+  const walk = (rel) => {
+    const abs = join(pub, rel);
+    if (!existsSync(abs)) return;
+    for (const entry of readdirSync(abs, { withFileTypes: true })) {
+      const child = `${rel}/${entry.name}`;
+      if (entry.isDirectory()) walk(child);
+      else if (!entry.name.startsWith(".")) urls.push(`/${child}`);
+    }
+  };
+  for (const dir of OFFLINE_DIRS) walk(dir);
+  const worker = join(pub, "pdf.worker.min.mjs");
+  if (existsSync(worker)) urls.unshift("/pdf.worker.min.mjs");
+
+  urls.sort();
+  writeFileSync(join(pub, "offline-assets.json"), JSON.stringify({ version: Date.now(), urls }, null, 0));
+  let bytes = 0;
+  for (const u of urls) {
+    try { bytes += statSync(join(pub, u.slice(1))).size; } catch {}
+  }
+  console.log(`[assets] offline-assets.json  (${urls.length} files, ${(bytes / 1048576).toFixed(1)} MB)`);
 }
 
 console.log("[assets] done.");

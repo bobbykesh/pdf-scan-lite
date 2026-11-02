@@ -1,5 +1,4 @@
 /** Kept in one place so the deployment notes and the code never drift. */
-export const TESSERACT_CDN_FALLBACK = "https://cdn.jsdelivr.net/npm/tesseract.js@7/dist/worker.min.js";
 
 export const APP_NAME = "PDF Scan Lite";
 export const APP_TAGLINE = "Scan, edit, sign & OCR PDFs — entirely in your browser.";

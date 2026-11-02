@@ -8,7 +8,6 @@
  */
 import type { OcrResult, OcrWord, PageMeta } from "@/types";
 import { displaySize } from "./utils";
-import { TESSERACT_CDN_FALLBACK } from "./config";
 
 interface TessWord {
   text: string;
@@ -86,14 +85,40 @@ async function getWorker(lang: string, onProgress?: (p: OcrProgress) => void) {
         onProgress?.({ status: m.status ?? "working", progress: m.progress ?? 0 }),
     };
     if (!vendored) {
-      // fall back to the jsDelivr default the library ships with
-      delete opts.langPath;
-      delete opts.gzip;
-      void TESSERACT_CDN_FALLBACK;
+      // Never silently fall back to a CDN: this app promises on-device OCR.
+      throw new Error(
+        `Language data for "${lang}" is not installed. Expected ${LANG_PATH}/${lang}.traineddata.`
+      );
     }
     return (await createWorker(lang, 1, opts)) as unknown as TesseractWorker;
   })();
   return workerPromise;
+}
+
+/**
+ * Verifies the three things OCR needs are present locally, so the UI can tell
+ * the user (before they go offline) whether recognition will work.
+ */
+export async function ocrAssetsStatus(lang = "eng"): Promise<{ ready: boolean; missing: string[] }> {
+  const required = [
+    "/vendor/tesseract/worker.min.js",
+    `${LANG_PATH}/${lang}.traineddata`,
+    "/pdf.worker.min.mjs",
+    "/_next/static/",
+  ];
+  const missing: string[] = [];
+  await Promise.all(
+    required.map(async (url) => {
+      if (url.endsWith("/")) return; // chunk discovery, not a real file
+      try {
+        const res = await fetch(url, { method: "HEAD" });
+        if (!res.ok) missing.push(url);
+      } catch {
+        missing.push(url);
+      }
+    })
+  );
+  return { ready: missing.length === 0, missing };
 }
 
 export async function disposeOcrWorker() {

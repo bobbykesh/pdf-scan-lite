@@ -25,6 +25,7 @@ import {
 import { useStore } from "@/lib/store";
 import { useShell } from "./AppShell";
 import { Button, IconButton } from "./ui";
+import OfflineBadge from "./OfflineBadge";
 import { runOcrBatch } from "@/lib/ocrBatch";
 import type { OcrWord } from "@/types";
 
@@ -137,6 +138,10 @@ export default function TopBar({
           <p className="text-[13.5px] font-semibold tracking-tight">PDF Scan Lite</p>
           <p className="mt-1 text-[10.5px] text-dim">100% on-device</p>
         </div>
+      </div>
+
+      <div className="mx-2 hidden sm:block">
+        <OfflineBadge compact />
       </div>
 
       <div className="mx-1 hidden h-6 w-px bg-line md:block" />
