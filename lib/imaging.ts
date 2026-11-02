@@ -146,8 +146,66 @@ export function videoFrameCanvas(video: HTMLVideoElement, maxSide = 2600): HTMLC
  *
  * The result is an axis-aligned quad the user can drag for perspective.
  */
-export function detectDocumentCorners(source: HTMLCanvasElement): [Point, Point, Point, Point] {
-  const W = 200;
+export interface QuadDetection {
+  /** TL, TR, BR, BL in source pixels */
+  corners: [Point, Point, Point, Point];
+  /** 0..1 — how page-like the result is */
+  confidence: number;
+  /** false when we fell back to the full frame */
+  found: boolean;
+}
+
+const FULL_FRAME = (w: number, h: number): [Point, Point, Point, Point] => [
+  { x: 0, y: 0 },
+  { x: w, y: 0 },
+  { x: w, y: h },
+  { x: 0, y: h },
+];
+
+function quadArea(q: [Point, Point, Point, Point]): number {
+  let sum = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = q[i];
+    const b = q[(i + 1) % 4];
+    sum += a.x * b.y - b.x * a.y;
+  }
+  return Math.abs(sum) / 2;
+}
+
+/** All cross products share a sign → the quad is convex and not self-crossing. */
+function isConvex(q: [Point, Point, Point, Point]): boolean {
+  let sign = 0;
+  for (let i = 0; i < 4; i++) {
+    const a = q[i];
+    const b = q[(i + 1) % 4];
+    const c = q[(i + 2) % 4];
+    const cross = (b.x - a.x) * (c.y - b.y) - (b.y - a.y) * (c.x - b.x);
+    if (Math.abs(cross) < 1e-6) continue;
+    const s = Math.sign(cross);
+    if (sign === 0) sign = s;
+    else if (s !== sign) return false;
+  }
+  return true;
+}
+
+function sideLengths(q: [Point, Point, Point, Point]): number[] {
+  return q.map((a, i) => {
+    const b = q[(i + 1) % 4];
+    return Math.hypot(b.x - a.x, b.y - a.y);
+  });
+}
+
+/**
+ * Find the page as a true four-point quad.
+ *
+ * The previous implementation returned an axis-aligned bounding box, so any
+ * photo taken at an angle was "cropped" to a rectangle that included the desk.
+ * This version segments the brightest large region, then derives perspective
+ * corners from the extreme points of that region (min/max of x+y and x−y),
+ * which recovers rotation and keystone distortion instead of boxing it.
+ */
+export function detectDocumentCornersDetailed(source: HTMLCanvasElement): QuadDetection {
+  const W = 320;
   const H = Math.max(1, Math.round((source.height / source.width) * W));
   const small = document.createElement("canvas");
   small.width = W;
@@ -165,10 +223,10 @@ export function detectDocumentCorners(source: HTMLCanvasElement): [Point, Point,
   }
   const t = otsu(hist, W * H);
 
-  // polarity: compare border ring with the centre
+  // Paper is usually brighter than its surroundings — decide per image.
   let border = 0;
   let borderN = 0;
-  const inset = Math.max(1, Math.round(Math.min(W, H) * 0.03));
+  const inset = Math.max(1, Math.round(Math.min(W, H) * 0.04));
   for (let y = 0; y < H; y++) {
     for (let x = 0; x < W; x++) {
       if (x < inset || y < inset || x >= W - inset || y >= H - inset) {
@@ -186,97 +244,124 @@ export function detectDocumentCorners(source: HTMLCanvasElement): [Point, Point,
     }
   }
   const brightDoc = centre / Math.max(1, centreN) > border / Math.max(1, borderN);
-  const mask = new Uint8Array(W * H);
-  for (let p = 0; p < mask.length; p++) mask[p] = brightDoc ? (lum[p] > t ? 1 : 0) : lum[p] < t ? 1 : 0;
 
-  // largest connected component (4-neighbour flood fill)
+  const mask = new Uint8Array(W * H);
+  for (let p = 0; p < mask.length; p++) {
+    const on = brightDoc ? lum[p] > t : lum[p] < t;
+    mask[p] = on ? 1 : 0;
+  }
+
+  // Largest connected component.
   const seen = new Uint8Array(W * H);
-  let best = { area: 0, minX: 0, minY: 0, maxX: W - 1, maxY: H - 1 };
+  let bestPixels: number[] = [];
   const stack: number[] = [];
   for (let p0 = 0; p0 < mask.length; p0++) {
     if (!mask[p0] || seen[p0]) continue;
-    let area = 0;
-    let minX = W;
-    let minY = H;
-    let maxX = 0;
-    let maxY = 0;
+    const pixels: number[] = [];
     stack.length = 0;
     stack.push(p0);
     seen[p0] = 1;
     while (stack.length) {
       const p = stack.pop()!;
+      pixels.push(p);
       const x = p % W;
       const y = (p - x) / W;
-      area++;
-      if (x < minX) minX = x;
-      if (x > maxX) maxX = x;
-      if (y < minY) minY = y;
-      if (y > maxY) maxY = y;
-      const nb = [x > 0 ? p - 1 : -1, x < W - 1 ? p + 1 : -1, y > 0 ? p - W : -1, y < H - 1 ? p + W : -1];
-      for (const n of nb) {
-        if (n >= 0 && mask[n] && !seen[n]) {
-          seen[n] = 1;
-          stack.push(n);
-        }
-      }
+      if (x > 0 && mask[p - 1] && !seen[p - 1]) { seen[p - 1] = 1; stack.push(p - 1); }
+      if (x < W - 1 && mask[p + 1] && !seen[p + 1]) { seen[p + 1] = 1; stack.push(p + 1); }
+      if (y > 0 && mask[p - W] && !seen[p - W]) { seen[p - W] = 1; stack.push(p - W); }
+      if (y < H - 1 && mask[p + W] && !seen[p + W]) { seen[p + W] = 1; stack.push(p + W); }
     }
-    if (area > best.area) best = { area, minX, minY, maxX, maxY };
+    if (pixels.length > bestPixels.length) bestPixels = pixels;
   }
 
-  const covered = best.area > 0 ? best.area / (W * H) : 0;
-  // if nothing sensible was found (or the "sheet" is tiny), fall back to full frame
-  if (covered < 0.12) {
-    return [
-      { x: 0, y: 0 },
-      { x: source.width, y: 0 },
-      { x: source.width, y: source.height },
-      { x: 0, y: source.height },
-    ];
+  const covered = bestPixels.length / (W * H);
+  // Too small to be a page, or so large it is obviously the whole frame.
+  if (covered < 0.08 || covered > 0.985) {
+    return {
+      corners: FULL_FRAME(source.width, source.height),
+      confidence: 0,
+      found: false,
+    };
   }
 
-  // refine each side with the strongest horizontal / vertical gradients nearby
-  const colEdge = new Float32Array(W);
-  const rowEdge = new Float32Array(H);
-  for (let y = 1; y < H; y++) {
-    for (let x = 1; x < W; x++) {
-      const gx = Math.abs(lum[y * W + x] - lum[y * W + x - 1]);
-      const gy = Math.abs(lum[y * W + x] - lum[(y - 1) * W + x]);
-      if (gx > 18) colEdge[x] += gx;
-      if (gy > 18) rowEdge[y] += gy;
-    }
+  // Perspective corners from the extreme points of the region.
+  let tl = 0, tr = 0, br = 0, bl = 0;
+  let minSum = Infinity, maxSum = -Infinity, minDiff = Infinity, maxDiff = -Infinity;
+  for (const p of bestPixels) {
+    const x = p % W;
+    const y = (p - x) / W;
+    const sum = x + y;
+    const diff = x - y;
+    if (sum < minSum) { minSum = sum; tl = p; }
+    if (sum > maxSum) { maxSum = sum; br = p; }
+    if (diff > maxDiff) { maxDiff = diff; tr = p; }
+    if (diff < minDiff) { minDiff = diff; bl = p; }
   }
-  const peak = (arr: Float32Array, centreIdx: number, span: number) => {
-    let bi = -1;
-    let bv = 0;
-    for (let i = Math.max(1, Math.round(centreIdx - span)); i <= Math.min(arr.length - 2, Math.round(centreIdx + span)); i++) {
-      if (arr[i] > bv) {
-        bv = arr[i];
-        bi = i;
-      }
-    }
-    return bi < 0 ? Math.round(centreIdx) : bi;
+
+  const toSource = (p: number): Point => {
+    const x = p % W;
+    const y = (p - x) / W;
+    return {
+      x: Math.min(source.width, Math.max(0, (x / W) * source.width)),
+      y: Math.min(source.height, Math.max(0, (y / H) * source.height)),
+    };
   };
-  const spanX = Math.max(3, Math.round(W * 0.035));
-  const spanY = Math.max(3, Math.round(H * 0.035));
-  const left = peak(colEdge, best.minX, spanX);
-  const right = peak(colEdge, best.maxX, spanX);
-  const top = peak(rowEdge, best.minY, spanY);
-  const bottom = peak(rowEdge, best.maxY, spanY);
 
-  const sx = source.width / W;
-  const sy = source.height / H;
-  const clampX = (v: number) => Math.min(source.width, Math.max(0, v * sx));
-  const clampY = (v: number) => Math.min(source.height, Math.max(0, v * sy));
-  const x0 = clampX(Math.min(left, right));
-  const x1 = clampX(Math.max(left, right));
-  const y0 = clampY(Math.min(top, bottom));
-  const y1 = clampY(Math.max(top, bottom));
-  return [
-    { x: x0, y: y0 },
-    { x: x1, y: y0 },
-    { x: x1, y: y1 },
-    { x: x0, y: y1 },
-  ];
+  const quad = [toSource(tl), toSource(tr), toSource(br), toSource(bl)] as [Point, Point, Point, Point];
+
+  // Refine each corner outward a little so it sits on the page edge rather than
+  // one radius inside the filled region.
+  const refine = (corner: Point, dirX: number, dirY: number, radius: number): Point => {
+    const cx = Math.round((corner.x / source.width) * W);
+    const cy = Math.round((corner.y / source.height) * H);
+    let bestX = cx;
+    let bestY = cy;
+    let bestScore = -Infinity;
+    for (let dy = -radius; dy <= radius; dy++) {
+      for (let dx = -radius; dx <= radius; dx++) {
+        const x = cx + dx;
+        const y = cy + dy;
+        if (x < 0 || y < 0 || x >= W || y >= H) continue;
+        if (!mask[y * W + x]) continue;
+        const score = dx * dirX + dy * dirY;
+        if (score > bestScore) { bestScore = score; bestX = x; bestY = y; }
+      }
+    }
+    return {
+      x: Math.min(source.width, Math.max(0, (bestX / W) * source.width)),
+      y: Math.min(source.height, Math.max(0, (bestY / H) * source.height)),
+    };
+  };
+  const r = Math.max(3, Math.round(W * 0.03));
+  quad[0] = refine(quad[0], -1, -1, r);
+  quad[1] = refine(quad[1], 1, -1, r);
+  quad[2] = refine(quad[2], 1, 1, r);
+  quad[3] = refine(quad[3], -1, 1, r);
+
+  const area = quadArea(quad);
+  const frameArea = source.width * source.height;
+  const sides = sideLengths(quad);
+  const minSide = Math.min(...sides);
+  const valid =
+    isConvex(quad) &&
+    area > frameArea * 0.06 &&
+    area < frameArea * 0.999 &&
+    minSide > Math.min(source.width, source.height) * 0.06;
+
+  if (!valid) {
+    return { corners: FULL_FRAME(source.width, source.height), confidence: 0, found: false };
+  }
+
+  // Confidence blends coverage with how rectangular the result is.
+  const longest = Math.max(...sides);
+  const squareness = minSide / Math.max(1, longest);
+  const confidence = Math.min(1, covered / 0.5) * 0.6 + squareness * 0.4;
+
+  return { corners: quad, confidence, found: true };
+}
+
+export function detectDocumentCorners(source: HTMLCanvasElement): [Point, Point, Point, Point] {
+  return detectDocumentCornersDetailed(source).corners;
 }
 
 function otsu(hist: Uint32Array, total: number): number {
@@ -332,46 +417,133 @@ export interface WarpResult {
   height: number;
 }
 
-/**
- * Warp the quadrilateral `quad` (source pixels: TL, TR, BR, BL) onto a
- * rectangular canvas, using inverse homography + bilinear sampling.
- */
-export function warpPerspective(
-  source: HTMLCanvasElement,
+/** Destination size for a quad: long edge capped, never upscaled past source. */
+export function warpSize(
   quad: [Point, Point, Point, Point],
   maxSide = 2400
-): WarpResult {
+): { width: number; height: number } {
   const [tl, tr, br, bl] = quad;
   const wTop = Math.hypot(tr.x - tl.x, tr.y - tl.y);
   const wBottom = Math.hypot(br.x - bl.x, br.y - bl.y);
   const hLeft = Math.hypot(bl.x - tl.x, bl.y - tl.y);
   const hRight = Math.hypot(br.x - tr.x, br.y - tr.y);
-  let outW = Math.round(Math.max(wTop, wBottom));
-  let outH = Math.round(Math.max(hLeft, hRight));
-  const shrink = Math.min(1, maxSide / Math.max(outW, outH));
-  outW = Math.max(16, Math.round(outW * shrink));
-  outH = Math.max(16, Math.round(outH * shrink));
+  const outW = Math.max(wTop, wBottom);
+  const outH = Math.max(hLeft, hRight);
+  const shrink = Math.min(1, maxSide / Math.max(outW, outH, 1));
+  return {
+    width: Math.max(16, Math.round(outW * shrink)),
+    height: Math.max(16, Math.round(outH * shrink)),
+  };
+}
 
-  // homography mapping destination (x,y) -> source (u,v)
+function buildHomography(quad: [Point, Point, Point, Point], outW: number, outH: number) {
   const dst: Point[] = [
     { x: 0, y: 0 },
     { x: outW, y: 0 },
     { x: outW, y: outH },
     { x: 0, y: outH },
   ];
-  const src = [tl, tr, br, bl];
   const A: number[][] = [];
   const bv: number[] = [];
   for (let i = 0; i < 4; i++) {
     const { x, y } = dst[i];
-    const { x: u, y: v } = src[i];
+    const { x: u, y: v } = quad[i];
     A.push([x, y, 1, 0, 0, 0, -u * x, -u * y]);
     bv.push(u);
     A.push([0, 0, 0, x, y, 1, -v * x, -v * y]);
     bv.push(v);
   }
-  const h = solve8(A, bv);
+  return solve8(A, bv);
+}
 
+export interface WarpOptions {
+  maxSide?: number;
+  /** Called after each tile: 0..1 */
+  onProgress?: (fraction: number) => void;
+  /** Yield to the event loop between tiles. */
+  yieldToUi?: boolean;
+}
+
+/**
+ * Warp a quad onto a rectangle, in horizontal bands.
+ *
+ * The old implementation ran one 5.7-million-pixel loop on the main thread,
+ * which locked the UI for seconds and made the crop feel broken. This version
+ * renders ~64-row tiles and yields between them, so the interface stays
+ * responsive and can show real progress.
+ */
+export async function warpPerspectiveAsync(
+  source: HTMLCanvasElement,
+  quad: [Point, Point, Point, Point],
+  opts: WarpOptions = {}
+): Promise<WarpResult> {
+  const { maxSide = 2400, onProgress, yieldToUi = true } = opts;
+  const { width: outW, height: outH } = warpSize(quad, maxSide);
+  const h = buildHomography(quad, outW, outH);
+
+  const sctx = source.getContext("2d", { alpha: false })!;
+  const sdat = sctx.getImageData(0, 0, source.width, source.height).data;
+  const SW = source.width;
+  const SH = source.height;
+
+  const out = document.createElement("canvas");
+  out.width = outW;
+  out.height = outH;
+  const octx = out.getContext("2d", { alpha: false })!;
+
+  const BAND = Math.max(32, Math.min(96, Math.round(3_000_000 / Math.max(1, outW))));
+  for (let y0 = 0; y0 < outH; y0 += BAND) {
+    const bandH = Math.min(BAND, outH - y0);
+    const odat = octx.createImageData(outW, bandH);
+    const o = odat.data;
+
+    for (let y = y0; y < y0 + bandH; y++) {
+      const row = y - y0;
+      for (let x = 0; x < outW; x++) {
+        const den = h[6] * x + h[7] * y + 1;
+        const u = (h[0] * x + h[1] * y + h[2]) / den;
+        const v = (h[3] * x + h[4] * y + h[5]) / den;
+        const oi = (row * outW + x) * 4;
+        if (u < 0 || v < 0 || u >= SW - 1 || v >= SH - 1) {
+          o[oi] = 255;
+          o[oi + 1] = 255;
+          o[oi + 2] = 255;
+          o[oi + 3] = 255;
+          continue;
+        }
+        const xa = u | 0;
+        const ya = v | 0;
+        const fx = u - xa;
+        const fy = v - ya;
+        const i00 = (ya * SW + xa) * 4;
+        const i10 = i00 + 4;
+        const i01 = ((ya + 1) * SW + xa) * 4;
+        const i11 = i01 + 4;
+        for (let ch = 0; ch < 3; ch++) {
+          const a = sdat[i00 + ch] * (1 - fx) + sdat[i10 + ch] * fx;
+          const b = sdat[i01 + ch] * (1 - fx) + sdat[i11 + ch] * fx;
+          o[oi + ch] = a * (1 - fy) + b * fy;
+        }
+        o[oi + 3] = 255;
+      }
+    }
+    octx.putImageData(odat, 0, y0);
+
+    onProgress?.(Math.min(1, (y0 + bandH) / outH));
+    if (yieldToUi) await new Promise((r) => setTimeout(r, 0));
+  }
+
+  return { canvas: out, width: outW, height: outH };
+}
+
+/** Synchronous wrapper (kept for callers that do not need progress). */
+export function warpPerspective(
+  source: HTMLCanvasElement,
+  quad: [Point, Point, Point, Point],
+  maxSide = 2400
+): WarpResult {
+  const { width: outW, height: outH } = warpSize(quad, maxSide);
+  const h = buildHomography(quad, outW, outH);
   const sctx = source.getContext("2d", { alpha: false })!;
   const sdat = sctx.getImageData(0, 0, source.width, source.height).data;
   const SW = source.width;
@@ -391,24 +563,21 @@ export function warpPerspective(
       const v = (h[3] * x + h[4] * y + h[5]) / den;
       const oi = (y * outW + x) * 4;
       if (u < 0 || v < 0 || u >= SW - 1 || v >= SH - 1) {
-        o[oi] = 255;
-        o[oi + 1] = 255;
-        o[oi + 2] = 255;
-        o[oi + 3] = 255;
+        o[oi] = o[oi + 1] = o[oi + 2] = o[oi + 3] = 255;
         continue;
       }
-      const x0 = u | 0;
-      const y0 = v | 0;
-      const fx = u - x0;
-      const fy = v - y0;
-      const i00 = (y0 * SW + x0) * 4;
+      const xa = u | 0;
+      const ya = v | 0;
+      const fx = u - xa;
+      const fy = v - ya;
+      const i00 = (ya * SW + xa) * 4;
       const i10 = i00 + 4;
-      const i01 = ((y0 + 1) * SW + x0) * 4;
+      const i01 = ((ya + 1) * SW + xa) * 4;
       const i11 = i01 + 4;
       for (let ch = 0; ch < 3; ch++) {
         const a = sdat[i00 + ch] * (1 - fx) + sdat[i10 + ch] * fx;
-        const bb = sdat[i01 + ch] * (1 - fx) + sdat[i11 + ch] * fx;
-        o[oi + ch] = a * (1 - fy) + bb * fy;
+        const b = sdat[i01 + ch] * (1 - fx) + sdat[i11 + ch] * fx;
+        o[oi + ch] = a * (1 - fy) + b * fy;
       }
       o[oi + 3] = 255;
     }

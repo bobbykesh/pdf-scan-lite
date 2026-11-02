@@ -20,12 +20,13 @@ import { Button, IconButton, Modal, Segmented } from "./ui";
 import {
   applyScanFilterToCopy,
   captureFrame,
-  detectDocumentCorners,
+  detectDocumentCornersDetailed,
   filteredPreviewUrl,
   frameHasContent,
-  warpPerspective,
+  warpPerspectiveAsync,
   type ScanFilter,
 } from "@/lib/imaging";
+import CropStage, { type Quad } from "./CropStage";
 import { fitA4, uid } from "@/lib/utils";
 import type { PageMeta, Point } from "@/types";
 
@@ -45,96 +46,6 @@ const FULL_QUAD = (w: number, h: number): [Point, Point, Point, Point] => [
   { x: 0, y: h },
 ];
 
-/**
- * Preview + draggable corner handles for the crop quad.
- *
- * The image fills the container width; handles and the polygon are positioned as
- * percentages of the source bitmap, so the overlay stays perfectly aligned at any
- * viewport size (phones included).
- */
-function CropStage({
-  preview,
-  width,
-  height,
-  corners,
-  setCorners,
-}: {
-  preview: string;
-  width: number;
-  height: number;
-  corners: [Point, Point, Point, Point];
-  setCorners: (c: [Point, Point, Point, Point]) => void;
-}) {
-  const ref = useRef<HTMLDivElement | null>(null);
-  const dragIdx = useRef<number | null>(null);
-  const dragBox = useRef<{ rect: DOMRect } | null>(null);
-
-  const pct = (v: number, total: number) => `${(v / total) * 100}%`;
-
-  const onDown = (i: number) => (e: React.PointerEvent) => {
-    e.stopPropagation();
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    dragIdx.current = i;
-    dragBox.current = ref.current ? { rect: ref.current.getBoundingClientRect() } : null;
-  };
-  const onMove = (e: React.PointerEvent) => {
-    const box = dragBox.current;
-    if (dragIdx.current === null || !box) return;
-    const x = Math.max(0, Math.min(width, ((e.clientX - box.rect.left) / box.rect.width) * width));
-    const y = Math.max(0, Math.min(height, ((e.clientY - box.rect.top) / box.rect.height) * height));
-    const next = [...corners] as [Point, Point, Point, Point];
-    next[dragIdx.current] = { x, y };
-    setCorners(next);
-  };
-  const onUp = () => {
-    dragIdx.current = null;
-    dragBox.current = null;
-  };
-
-  return (
-    <div className="flex justify-center">
-      <div
-        ref={ref}
-        className="relative mx-auto w-full max-w-[560px] overflow-hidden rounded-lg border border-line2 bg-black"
-        style={{ maxHeight: "46dvh" }}
-      >
-        <img
-          src={preview}
-          alt="Captured page"
-          className="mx-auto block h-auto max-h-[46dvh] w-auto max-w-full select-none object-contain"
-          draggable={false}
-        />
-        <svg
-          className="pointer-events-none absolute inset-0 h-full w-full"
-          viewBox={`0 0 ${width} ${height}`}
-          preserveAspectRatio="none"
-        >
-          <polygon
-            points={corners.map((c) => `${c.x},${c.y}`).join(" ")}
-            fill="rgba(109,124,255,.16)"
-            stroke="#8b95ff"
-            vectorEffect="non-scaling-stroke"
-            style={{ strokeDasharray: "7 5", strokeWidth: 2 }}
-          />
-        </svg>
-        {corners.map((c, i) => (
-          <div
-            key={i}
-            onPointerDown={onDown(i)}
-            onPointerMove={onMove}
-            onPointerUp={onUp}
-            onPointerCancel={onUp}
-            className="absolute grid h-7 w-7 -translate-x-1/2 -translate-y-1/2 cursor-grab touch-none place-items-center rounded-full border-2 border-white bg-accent/90 shadow-lg active:cursor-grabbing"
-            style={{ left: pct(c.x, width), top: pct(c.y, height) }}
-          >
-            <span className="h-1.5 w-1.5 rounded-full bg-white" />
-          </div>
-        ))}
-      </div>
-    </div>
-  );
-}
-
 export default function ScannerModal() {
   const shell = useShell();
   const store = useStore();
@@ -148,6 +59,7 @@ export default function ScannerModal() {
   const [starting, setStarting] = useState(false);
   const [mode, setMode] = useState<Mode>("capture");
   const [busy, setBusy] = useState<null | "capture" | "crop" | "save">(null);
+  const [cropPct, setCropPct] = useState(0);
 
   /**
    * `raw` is the pristine, never-mutated bitmap of the current shot.
@@ -156,7 +68,8 @@ export default function ScannerModal() {
    */
   const [raw, setRaw] = useState<HTMLCanvasElement | null>(null);
   const [cropped, setCropped] = useState<HTMLCanvasElement | null>(null);
-  const [corners, setCorners] = useState<[Point, Point, Point, Point] | null>(null);
+  const [corners, setCorners] = useState<Quad | null>(null);
+  const [cropConfidence, setCropConfidence] = useState<number | null>(null);
   const [filter, setFilter] = useState<ScanFilter>("vivid");
   const [autoCrop, setAutoCrop] = useState(true);
   const [flash, setFlash] = useState(false);
@@ -258,28 +171,37 @@ export default function ScannerModal() {
     }
     setRaw(canvas);
     // honour the "auto-detect page edges" toggle instead of always detecting
-    setCorners(autoCrop ? detectDocumentCorners(canvas) : FULL_QUAD(canvas.width, canvas.height));
+    if (autoCrop) {
+      const det = detectDocumentCornersDetailed(canvas);
+      setCorners(det.corners);
+      setCropConfidence(det.found ? det.confidence : 0);
+    } else {
+      setCorners(FULL_QUAD(canvas.width, canvas.height));
+      setCropConfidence(null);
+    }
     setCropped(null);
     setMode("crop");
     setBusy(null);
   };
 
-  const confirmCrop = () => {
+  const confirmCrop = async () => {
     if (!raw || busy) return;
     setBusy("crop");
+    setCropPct(0);
     const quad = corners ?? FULL_QUAD(raw.width, raw.height);
-    // let the spinner paint before the (synchronous) warp runs
-    setTimeout(() => {
-      let result = raw;
-      try {
-        result = warpPerspective(raw, quad, 2400).canvas;
-      } catch {
-        result = raw;
-      }
-      setCropped(result);
-      setMode("review");
-      setBusy(null);
-    }, 30);
+    let result = raw;
+    try {
+      // Tiled + yielding, so the dialog never freezes while it works.
+      result = (await warpPerspectiveAsync(raw, quad, {
+        maxSide: 2400,
+        onProgress: (f) => setCropPct(Math.round(f * 100)),
+      })).canvas;
+    } catch {
+      result = raw;
+    }
+    setCropped(result);
+    setMode("review");
+    setBusy(null);
   };
 
   const commit = (another: boolean) => {
@@ -353,7 +275,7 @@ export default function ScannerModal() {
                 </Button>
                 <Button variant="primary" onClick={confirmCrop} disabled={!!busy}>
                   {busy === "crop" ? <Loader2 size={15} className="animate-spin" /> : <Crop size={15} />}
-                  {busy === "crop" ? "Cropping…" : "Use this crop"}
+                  {busy === "crop" ? `Cropping ${cropPct}%` : "Use this crop"}
                 </Button>
               </>
             ) : mode === "review" ? (
@@ -392,10 +314,15 @@ export default function ScannerModal() {
         </div>
       }
     >
-      <div className="bg-[#06080d] p-4 sm:p-5">
+      <div className={mode === "crop" ? "bg-[#06080d] p-3 sm:p-4" : "bg-[#06080d] p-4 sm:p-5"}
+        style={mode === "crop" ? { height: "min(62dvh, 560px)" } : undefined}
+      >
         {mode === "capture" ? (
           <div className="relative mx-auto max-w-3xl">
-            <div className="relative aspect-[4/3] overflow-hidden rounded-xl border border-line2 bg-black">
+            <div
+              className="relative mx-auto aspect-[4/3] w-full overflow-hidden rounded-xl border border-line2 bg-black"
+              style={{ maxHeight: "min(56dvh, 520px)" }}
+            >
               <video ref={videoRef} playsInline muted autoPlay className="h-full w-full object-contain" />
               {flash ? <div className="absolute inset-0 bg-white" /> : null}
               {/* framing guides */}
@@ -457,25 +384,59 @@ export default function ScannerModal() {
             </div>
           </div>
         ) : mode === "crop" && raw ? (
-          <div className="space-y-3">
-            <CropStage
-              preview={cropPreview}
-              width={raw.width}
-              height={raw.height}
-              corners={corners ?? FULL_QUAD(raw.width, raw.height)}
-              setCorners={setCorners}
-            />
-            <div className="flex flex-wrap items-center justify-center gap-2 text-[11.5px]">
-              <Button variant="outline" size="sm" onClick={() => setCorners(FULL_QUAD(raw.width, raw.height))}>
+          <div className="flex h-full min-h-0 flex-col gap-2.5">
+            {/* 4:3 viewfinder — the same frame the camera previewed in. */}
+            <div className="min-h-0 flex-1">
+              <CropStage
+                preview={cropPreview}
+                width={raw.width}
+                height={raw.height}
+                corners={corners ?? FULL_QUAD(raw.width, raw.height)}
+                setCorners={setCorners}
+                busy={busy === "crop"}
+                onAutoCrop={() => {
+                  const det = detectDocumentCornersDetailed(raw);
+                  setCorners(det.corners);
+                  setCropConfidence(det.found ? det.confidence : 0);
+                }}
+                onReset={() => {
+                  setCorners(FULL_QUAD(raw.width, raw.height));
+                  setCropConfidence(null);
+                }}
+              />
+            </div>
+
+            <div className="flex flex-wrap items-center justify-center gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  setCorners(FULL_QUAD(raw.width, raw.height));
+                  setCropConfidence(null);
+                }}
+              >
                 Full frame
               </Button>
-              <Button variant="outline" size="sm" onClick={() => setCorners(detectDocumentCorners(raw))}>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  const det = detectDocumentCornersDetailed(raw);
+                  setCorners(det.corners);
+                  setCropConfidence(det.found ? det.confidence : 0);
+                }}
+              >
                 <Wand2 size={13} /> Auto-crop
               </Button>
               <Segmented value={filter} onChange={(v) => setFilter(v as ScanFilter)} options={FILTER_OPTIONS} />
             </div>
+
             <p className="text-center text-[11px] text-dim">
-              The preview shows the selected look — the full-resolution page is rendered when you add it.
+              {cropConfidence === null
+                ? "Drag the corner dots, or drag the middle of the page to move the whole frame."
+                : cropConfidence < 0.35
+                  ? "Page edges not clear — drag the corners to fit the sheet."
+                  : `Page detected (${Math.round(cropConfidence * 100)}% match) — nudge the corners if needed.`}
             </p>
           </div>
         ) : cropped ? (
