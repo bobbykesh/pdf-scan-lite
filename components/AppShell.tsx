@@ -11,6 +11,7 @@ import TopBar from "./TopBar";
 import Thumbnails from "./Thumbnails";
 import Viewport from "./Viewport";
 import ToolRail from "./ToolRail";
+import MobileActionBar from "./MobileActionBar";
 import ScannerModal from "./ScannerModal";
 import ExportModal from "./ExportModal";
 import CompressModal from "./CompressModal";
@@ -59,7 +60,7 @@ function Workspace() {
 
   const toast = useCallback((text: string, kind: Toast["kind"] = "ok") => {
     const id = uid("t");
-    setToasts((prev) => [...prev.slice(-3), { id, kind, text }]);
+    setToasts((prev) => [...prev.slice(-1), { id, kind, text }]);
     setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4200);
   }, []);
 
@@ -226,6 +227,9 @@ function Workspace() {
           <Welcome />
         )}
 
+        {/* Phones and tablets get a native-style bottom action bar. */}
+        <MobileActionBar onOpenPages={() => setSidebarOpen(true)} />
+
         {/* floating busy pill */}
         {busy ? (
           <div className="pointer-events-none fixed left-1/2 top-16 z-40 -translate-x-1/2">
@@ -237,7 +241,7 @@ function Workspace() {
         ) : null}
 
         {/* toasts */}
-        <div className="pointer-events-none fixed bottom-4 left-1/2 z-[60] flex w-full max-w-sm -translate-x-1/2 flex-col gap-2 px-4">
+        <div className="pointer-events-none fixed bottom-[calc(4.5rem+env(safe-area-inset-bottom))] left-1/2 z-[60] flex w-full max-w-sm -translate-x-1/2 flex-col gap-2 px-4 lg:bottom-4">
           {toasts.map((t) => (
             <div
               key={t.id}

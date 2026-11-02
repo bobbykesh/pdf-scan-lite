@@ -29,6 +29,37 @@ import OfflineBadge from "./OfflineBadge";
 import { runOcrBatch } from "@/lib/ocrBatch";
 import type { OcrWord } from "@/types";
 
+/** Icon + visible label. Small enough for the toolbar, clear enough to read. */
+function ToolButton({
+  label,
+  hint,
+  onClick,
+  disabled,
+  children,
+  className = "",
+}: {
+  label: string;
+  hint?: string;
+  onClick: () => void;
+  disabled?: boolean;
+  children: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={hint ?? label}
+      aria-label={label}
+      className={`flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-transparent px-2 text-[12px] font-medium text-muted transition-colors hover:border-line2 hover:bg-panel2 hover:text-ink disabled:pointer-events-none disabled:opacity-40 ${className}`}
+    >
+      {children}
+      <span className="hidden 2xl:inline">{label}</span>
+    </button>
+  );
+}
+
 export default function TopBar({
   onToggleSidebar,
   sidebarOpen,
@@ -134,9 +165,9 @@ export default function TopBar({
             <path d="M4.5 7v13.5h11" stroke="white" strokeWidth="1.5" strokeLinecap="round" opacity=".55" />
           </svg>
         </div>
-        <div className="hidden leading-none sm:block">
+        <div className="hidden shrink-0 whitespace-nowrap leading-none sm:block">
           <p className="text-[13.5px] font-semibold tracking-tight">PDF Scan Lite</p>
-          <p className="mt-1 text-[10.5px] text-dim">100% on-device</p>
+          <p className="mt-1 hidden text-[10.5px] text-dim xl:block">100% on-device</p>
         </div>
       </div>
 
@@ -160,32 +191,44 @@ export default function TopBar({
       />
 
       <div className="flex items-center gap-1.5">
-        <Button variant="soft" size="md" onClick={() => fileRef.current?.click()} className="hidden xs:inline-flex sm:inline-flex">
-          <FolderOpen size={15} />
-          <span className="hidden sm:inline">Open</span>
-        </Button>
-        <Button variant="primary" size="md" onClick={() => shell.open("scanner")}>
-          <Camera size={15} />
-          <span className="hidden sm:inline">Scan</span>
-        </Button>
+        <span className="hidden sm:block">
+          <Button variant="soft" size="md" onClick={() => fileRef.current?.click()} title="Open a PDF or image">
+            <FolderOpen size={15} />
+            Open
+          </Button>
+        </span>
+        <span className="hidden sm:block">
+          <Button variant="primary" size="md" onClick={() => shell.open("scanner")} title="Scan with the camera">
+            <Camera size={15} />
+            Scan
+          </Button>
+        </span>
       </div>
 
       {hasPages ? (
         <>
           <div className="mx-1 hidden h-6 w-px bg-line sm:block" />
-          <div className="hidden items-center gap-0.5 sm:flex">
-            <IconButton label="Undo (⌘Z)" onClick={store.undo} disabled={!store.canUndo}>
-              <Undo2 size={16} />
-            </IconButton>
-            <IconButton label="Redo (⇧⌘Z)" onClick={store.redo} disabled={!store.canRedo}>
-              <Redo2 size={16} />
-            </IconButton>
-            <IconButton label="Rotate page left" onClick={() => store.currentPage && store.rotatePage(store.currentPage.id, -1)}>
-              <RotateCcw size={16} />
-            </IconButton>
-            <IconButton label="Rotate page right" onClick={() => store.currentPage && store.rotatePage(store.currentPage.id, 1)}>
-              <RotateCw size={16} />
-            </IconButton>
+          <div className="hidden md:flex items-center gap-0.5">
+            <ToolButton label="Undo" hint="Undo (Ctrl+Z)" onClick={store.undo} disabled={!store.canUndo}>
+              <Undo2 size={15} />
+            </ToolButton>
+            <ToolButton label="Redo" hint="Redo (Ctrl+Shift+Z)" onClick={store.redo} disabled={!store.canRedo}>
+              <Redo2 size={15} />
+            </ToolButton>
+            <ToolButton
+              label="Rotate page left"
+              hint="Rotate the current page 90° anticlockwise"
+              onClick={() => store.currentPage && store.rotatePage(store.currentPage.id, -1)}
+            >
+              <RotateCcw size={15} />
+            </ToolButton>
+            <ToolButton
+              label="Rotate page right"
+              hint="Rotate the current page 90° clockwise"
+              onClick={() => store.currentPage && store.rotatePage(store.currentPage.id, 1)}
+            >
+              <RotateCw size={15} />
+            </ToolButton>
           </div>
 
           <div className="hidden items-center gap-2 rounded-lg border border-line bg-panel2 px-2.5 py-1.5 lg:flex">
@@ -203,36 +246,44 @@ export default function TopBar({
 
       <div className="ml-auto flex items-center gap-1.5">
         {hasPages ? (
+          <span className="hidden md:block">
           <Button
             variant="outline"
             size="md"
             onClick={runOcr}
             disabled={ocrBusy}
-            className="hidden md:inline-flex"
-            title="Recognise text on every page (runs locally)"
+            title="Make text searchable — recognise text on every page (runs locally)"
           >
             {ocrBusy ? <Loader2 size={15} className="animate-spin" /> : <ScanText size={15} />}
-            {ocrBusy
-              ? `Recognising ${ocrPct}%`
-              : ocrCount === store.pages.length && ocrCount > 0
-                ? "Text ready"
-                : "OCR"}
+            <span className="whitespace-nowrap">
+              {ocrBusy
+                ? `Recognising ${ocrPct}%`
+                : ocrCount === store.pages.length && ocrCount > 0
+                  ? "Text ready"
+                  : "OCR — make text searchable"}
+            </span>
           </Button>
+          </span>
         ) : null}
 
-        <IconButton
-          label="Compress & resize"
-          className="hidden sm:grid"
+        <span className="hidden lg:block">
+        <ToolButton
+          label="Compress"
+          hint="Reduce file size"
+          className="hidden lg:flex"
           onClick={() => shell.open("compress")}
           disabled={!hasPages}
         >
-          <FileArchive size={17} />
-        </IconButton>
+          <FileArchive size={15} />
+        </ToolButton>
+        </span>
 
-        <Button variant="primary" size="md" onClick={() => shell.open("export")} disabled={!hasPages}>
-          <Download size={15} />
-          <span className="hidden sm:inline">Export</span>
-        </Button>
+        <span className="hidden sm:block">
+          <Button variant="primary" size="md" onClick={() => shell.open("export")} disabled={!hasPages}>
+            <Download size={15} />
+            Export
+          </Button>
+        </span>
 
         <div className="relative">
           <IconButton label="More" onClick={() => setMenu((v) => !v)} active={menu}>

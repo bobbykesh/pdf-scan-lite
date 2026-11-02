@@ -9,6 +9,7 @@ import {
   Loader2,
   RefreshCw,
   Repeat,
+  RotateCcw,
   RotateCw,
   SwitchCamera,
   Upload,
@@ -20,8 +21,10 @@ import { Button, IconButton, Modal, Segmented } from "./ui";
 import {
   applyScanFilterToCopy,
   captureFrame,
+  cropPreviewUrl,
   detectDocumentCornersDetailed,
   filteredPreviewUrl,
+  rotateCanvas,
   frameHasContent,
   warpPerspectiveAsync,
   type ScanFilter,
@@ -60,6 +63,8 @@ export default function ScannerModal() {
   const [mode, setMode] = useState<Mode>("capture");
   const [busy, setBusy] = useState<null | "capture" | "crop" | "save">(null);
   const [cropPct, setCropPct] = useState(0);
+  /** Page-level rotation applied to the crop quad / finished page. */
+  const [rotation, setRotation] = useState(0);
 
   /**
    * `raw` is the pristine, never-mutated bitmap of the current shot.
@@ -122,6 +127,8 @@ export default function ScannerModal() {
     setCropped(null);
     setCorners(null);
     setBusy(null);
+    setRotation(0);
+    setCropConfidence(null);
   }, []);
 
   useEffect(() => {
@@ -139,14 +146,18 @@ export default function ScannerModal() {
 
   // Downscaled JPEGs, computed only when the input actually changes.
   const rawPreview = useMemo(() => (raw ? filteredPreviewUrl(raw, "original", 1000, 0.85) : ""), [raw]);
+  // The crop preview is rendered at the selection's true aspect ratio, so the
+  // page is never stretched while the user adjusts the corners.
   const cropPreview = useMemo(
-    () => (raw ? filteredPreviewUrl(raw, filter, 1000, 0.85) : ""),
-    [raw, filter]
+    () => (raw ? cropPreviewUrl(raw, corners ?? FULL_QUAD(raw.width, raw.height), filter, 1100, 0.86) : ""),
+    [raw, corners, filter]
   );
-  const reviewPreview = useMemo(
-    () => (cropped ? filteredPreviewUrl(cropped, filter, 1000, 0.88) : ""),
-    [cropped, filter]
-  );
+  const reviewPreview = useMemo(() => {
+    if (!cropped) return "";
+    // Rotate the bitmap itself so the layout box matches what you see — CSS
+    // rotation keeps the original box and clips the page.
+    return filteredPreviewUrl(rotateCanvas(cropped, rotation), filter, 1000, 0.88);
+  }, [cropped, filter, rotation]);
 
   /* ---------------------------------------------------------------- actions */
 
@@ -211,13 +222,15 @@ export default function ScannerModal() {
       // full-resolution render of the chosen look — derived from the pristine crop
       const finalCanvas = applyScanFilterToCopy(cropped, filter);
       const dataUrl = finalCanvas.toDataURL("image/jpeg", 0.92);
-      const fit = fitA4(cropped.width, cropped.height);
+      // 90°/270° swap the page box so the sheet fills A4 the right way round.
+      const upright = rotation % 180 === 0 ? cropped : { width: cropped.height, height: cropped.width };
+      const fit = fitA4(upright.width, upright.height);
       const page: PageMeta = {
         id: uid("pg"),
         source: { kind: "image", dataUrl, mime: "image/jpeg" },
         wPt: fit.wPt,
         hPt: fit.hPt,
-        rotation: 0,
+        rotation: (((rotation % 360) + 360) % 360) as PageMeta["rotation"],
         ocrState: "idle",
       };
       store.setPages((prev) => [...prev, page]);
@@ -244,6 +257,8 @@ export default function ScannerModal() {
     const order: ScanFilter[] = ["original", "vivid", "gray", "bw"];
     setFilter(order[(order.indexOf(filter) + 1) % order.length]);
   };
+
+  const rotated = rotation % 180 !== 0;
 
   const subtitle =
     mode === "capture"
@@ -440,28 +455,54 @@ export default function ScannerModal() {
             </p>
           </div>
         ) : cropped ? (
-          <div className="space-y-3">
-            <div className="mx-auto flex max-w-md justify-center">
+          <div className="flex h-full min-h-0 flex-col gap-2.5">
+            {/* Big, upright preview — rotate here before adding the page. */}
+            <div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden">
               <div className="overflow-hidden rounded-lg border border-line2 bg-white shadow-sm">
+                {/*
+                  CSS rotate() does not change the layout box, so a 90°/270° turn
+                  overflows. For those angles the layout is constrained to the
+                  swapped dimensions, which keeps the rotated sheet on screen.
+                */}
+                { }
                 <img
                   src={reviewPreview}
                   alt="Scanned page"
-                  className="block h-auto max-h-[46dvh] w-auto max-w-full object-contain"
+                  className="block h-auto w-auto max-w-full object-contain"
+                  style={{ maxHeight: "min(50dvh, 500px)" }}
                   draggable={false}
                 />
               </div>
             </div>
+
             <div className="flex flex-wrap items-center justify-center gap-2">
+              <div className="flex items-center gap-1 rounded-lg border border-line2 bg-panel2 p-1">
+                <IconButton
+                  label={rotation ? `Rotate left (currently ${rotation}°)` : "Rotate left"}
+                  onClick={() => setRotation((r) => (r + 270) % 360)}
+                >
+                  <RotateCcw size={16} />
+                </IconButton>
+                <span className="min-w-[38px] text-center text-[11.5px] tabular-nums text-muted">{rotation}°</span>
+                <IconButton label="Rotate right" onClick={() => setRotation((r) => (r + 90) % 360)}>
+                  <RotateCw size={16} />
+                </IconButton>
+              </div>
+
               <Segmented value={filter} onChange={(v) => setFilter(v as ScanFilter)} options={FILTER_OPTIONS} />
+            </div>
+
+            <div className="flex flex-wrap items-center justify-center gap-2">
               <Button variant="ghost" size="sm" onClick={() => setMode("crop")}>
-                <RotateCw size={13} /> Re-crop
+                <Crop size={13} /> Adjust crop
               </Button>
               <Button variant="ghost" size="sm" onClick={cycleFilter}>
-                <Wand2 size={13} /> Cycle look
+                <Wand2 size={13} /> Next look
               </Button>
             </div>
+
             <p className="text-center text-[11px] text-dim">
-              Switching looks is lossless — every look is re-computed from the original capture.
+              Rotate until the text reads left-to-right, then add the page.
             </p>
           </div>
         ) : null}

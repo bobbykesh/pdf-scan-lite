@@ -157,7 +157,7 @@ export default function OfflineBadge({ compact = false }: { compact?: boolean })
                 : "Downloading the PDF + OCR engines for offline use. Keep this tab open."
           )
         }
-        className={`flex items-center gap-1.5 rounded-full border border-line2 bg-panel2 px-2.5 py-1 text-[11px] transition-colors hover:border-accent/40 ${tone}`}
+        className={`flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-full border border-line2 bg-panel2 px-2.5 py-1 text-[11px] transition-colors hover:border-accent/40 ${tone}`}
         title="Offline readiness"
       >
         <Icon size={12} className={state.kind === "caching" ? "animate-spin" : undefined} />

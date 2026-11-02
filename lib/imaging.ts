@@ -612,6 +612,58 @@ export function applyScanFilterToCopy(source: HTMLCanvasElement, filter: ScanFil
   return applyScanFilter(downscaleCopy(source, Math.max(source.width, source.height)), filter);
 }
 
+/** Rotate a canvas by 90/180/270 degrees, returning a new canvas. */
+export function rotateCanvas(source: HTMLCanvasElement, degrees: number): HTMLCanvasElement {
+  const d = ((degrees % 360) + 360) % 360;
+  if (d === 0) return source;
+  const swap = d === 90 || d === 270;
+  const out = document.createElement("canvas");
+  out.width = swap ? source.height : source.width;
+  out.height = swap ? source.width : source.height;
+  const ctx = out.getContext("2d", { alpha: false })!;
+  ctx.translate(out.width / 2, out.height / 2);
+  ctx.rotate((d * Math.PI) / 180);
+  ctx.drawImage(source, -source.width / 2, -source.height / 2);
+  return out;
+}
+
+/**
+ * Preview of the page *as it will look after cropping*, produced without
+ * distorting it.
+ *
+ * The crop stage shows the full capture so the user can drag the corners, but
+ * the confirmation preview used to reuse a full-frame square-ish bitmap, which
+ * made the page look squashed. This renders the source at the quad's real
+ * aspect ratio and letterboxes it inside the viewfinder instead.
+ */
+export function cropPreviewUrl(
+  source: HTMLCanvasElement,
+  quad: [Point, Point, Point, Point],
+  filter: ScanFilter,
+  maxSide = 900,
+  quality = 0.85
+): string {
+  // Undistorted aspect ratio of the selection.
+  const [tl, tr, br, bl] = quad;
+  const wTop = Math.hypot(tr.x - tl.x, tr.y - tl.y);
+  const wBottom = Math.hypot(br.x - bl.x, br.y - bl.y);
+  const hLeft = Math.hypot(bl.x - tl.x, bl.y - tl.y);
+  const hRight = Math.hypot(br.x - tr.x, br.y - tr.y);
+  const aspect = Math.max(wTop, wBottom) / Math.max(1, Math.max(hLeft, hRight));
+
+  const outW = Math.round(maxSide * Math.min(1, aspect));
+  const outH = Math.max(1, Math.round(outW / Math.max(0.05, aspect)));
+  const c = document.createElement("canvas");
+  c.width = Math.max(1, outW);
+  c.height = Math.max(1, outH);
+  const ctx = c.getContext("2d", { alpha: false })!;
+  ctx.imageSmoothingQuality = "high";
+  // Draw the source scaled to the *same* aspect the crop will produce: no stretch.
+  ctx.drawImage(source, 0, 0, c.width, c.height);
+  applyScanFilter(c, filter);
+  return c.toDataURL("image/jpeg", quality);
+}
+
 /**
  * Small JPEG data-URL of `source` with `filter` applied.
  * Filtering happens *after* downscaling, so this costs a few milliseconds even
