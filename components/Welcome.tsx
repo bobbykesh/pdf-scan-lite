@@ -127,12 +127,31 @@ export default function Welcome() {
         </p>
 
         <a
-          href="https://github.com"
-          onClick={(e) => e.preventDefault()}
+          href="https://github.com/bobbykesh/pdf-scan-lite"
+          target="_blank"
+          rel="noreferrer"
           className="mt-4 inline-flex items-center gap-1 text-[11.5px] text-muted hover:text-ink"
         >
           Read the architecture notes <ArrowRight size={12} />
         </a>
+
+        {/*
+          Ownership mark. Kept to the welcome screen — the one place with room
+          to spare — so it never competes with the page area on a phone, where
+          every pixel of height is already spoken for by the tool rail.
+        */}
+        <footer className="mt-10 w-full border-t border-line pt-5">
+          <p className="text-[12px] font-medium text-ink">
+            Designed by <span className="text-accent">Kesh</span> for Humanity
+          </p>
+          <p className="mt-1 text-[11px] text-dim">Enjoy, Humans 😉😎😎😎</p>
+          <p className="mt-3 text-[10.5px] text-dim">
+            © {new Date().getFullYear()} Kesh. All rights reserved.
+          </p>
+          <p className="mt-1 text-[10.5px] leading-relaxed text-dim">
+            Released for everyone to use freely. Please keep this notice with any copy.
+          </p>
+        </footer>
       </div>
     </div>
   );

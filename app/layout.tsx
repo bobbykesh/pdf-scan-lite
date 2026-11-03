@@ -8,7 +8,10 @@ export const metadata: Metadata = {
     "A lightweight, fully client-side PDF scanner and editor. Camera scanning, OCR, annotations, signatures, page management and compression. Your files never leave your device.",
   applicationName: "PDF Scan Lite",
   keywords: ["pdf scanner", "pdf editor", "ocr", "scan document", "sign pdf", "client side"],
-  authors: [{ name: "PDF Scan Lite" }],
+  authors: [{ name: "Kesh" }],
+  creator: "Kesh",
+  publisher: "Kesh",
+  other: { "copyright": "Kesh — Designed for Humanity" },
   manifest: "/manifest.webmanifest",
   appleWebApp: { capable: true, title: "PDF Scan Lite", statusBarStyle: "black-translucent" },
   icons: {

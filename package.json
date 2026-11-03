@@ -41,5 +41,6 @@
     "node": ">=20.9"
   },
   "description": "Client-side PDF scanner and editor: camera scanning with auto-crop, OCR, annotations, signatures, page management, compression and export. Nothing leaves the browser.",
-  "license": "MIT"
+  "license": "MIT",
+  "author": "Kesh"
 }
