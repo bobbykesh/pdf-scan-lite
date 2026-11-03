@@ -9,13 +9,13 @@ export function Root({ checked, onChange }: { checked: boolean; onChange: () => 
         e.stopPropagation();
         onChange();
       }}
-      className={`grid h-[18px] w-[18px] place-items-center rounded-[5px] border transition-colors ${
+      className={`grid h-[22px] w-[22px] place-items-center rounded-[6px] border shadow-sm transition-colors lg:h-[18px] lg:w-[18px] lg:shadow-none ${
         checked ? "border-accent bg-accent text-white" : "border-white/40 bg-black/50 text-transparent hover:border-white"
       }`}
       aria-pressed={checked}
       aria-label="Select page"
     >
-      <Check size={12} strokeWidth={3} />
+      <Check size={14} strokeWidth={3} />
     </button>
   );
 }

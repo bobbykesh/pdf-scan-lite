@@ -8,15 +8,14 @@
  *              engine + English language data (~18 MB) — into one cache.
  *              After this completes the app runs with the network switched off.
  *   activate : drop caches from previous builds.
- *   fetch    : cache-first for everything precached (the page is a static
- *              export, so a cached copy is never stale); network-first for
- *              navigations that were not precached.
+ *   fetch    : network-first for navigations (so a deployed update always
+ *              arrives), cache-first for the immutable prefetched assets.
  *
  * The asset list is generated at build time by scripts/copy-vendor-assets.mjs
  * into /offline-assets.json, so it can never drift from the real files.
  */
 
-const VERSION = "pdfsl-v2";
+const VERSION = "pdfsl-v3";
 const CACHE = `${VERSION}-offline`;
 const MANIFEST_URL = "/offline-assets.json";
 const SHELL_URLS = ["/", "/manifest.webmanifest", "/icon.svg", "/offline-assets.json"];
@@ -98,7 +97,9 @@ self.addEventListener("activate", (event) => {
   event.waitUntil(
     caches
       .keys()
-      .then((keys) => Promise.all(keys.filter((k) => !k.startsWith(VERSION)).map((k) => caches.delete(k))))
+      .then((keys) =>
+        Promise.all(keys.filter((k) => !k.startsWith(VERSION)).map((k) => caches.delete(k)))
+      )
       .then(() => self.clients.claim())
   );
 });
@@ -127,7 +128,33 @@ self.addEventListener("fetch", (event) => {
   const url = new URL(req.url);
   if (url.origin !== self.location.origin) return;
 
-  // Cache-first: everything precached is immutable for this build.
+  /* ------------------------------------------------------------------------
+   * Navigations are NETWORK-FIRST.
+   *
+   * The previous version was cache-first for everything, including the HTML.
+   * Once installed, a deployed update could never reach the user: the cached
+   * document always won, and it pointed at the old build's chunks (which were
+   * also cached). That is why a new version needed incognito to appear.
+   * ---------------------------------------------------------------------- */
+  if (req.mode === "navigate" || req.destination === "document") {
+    event.respondWith(
+      fetch(req, { cache: "no-store" })
+        .then((res) => {
+          if (res && res.ok) {
+            const copy = res.clone();
+            caches.open(CACHE).then((c) => c.put("/", copy)).catch(() => {});
+          }
+          return res;
+        })
+        .catch(async () => {
+          // Offline: serve the last known document, then the precached shell.
+          return (await caches.match(req)) || (await caches.match("/")) || Response.error();
+        })
+    );
+    return;
+  }
+
+  // Cache-first: everything else precached is immutable for this build.
   event.respondWith(
     caches.match(req).then((hit) => {
       if (hit) return hit;

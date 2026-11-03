@@ -77,6 +77,8 @@ export function Modal({
   footer,
   width = "max-w-3xl",
   bare,
+  fullScreenMobile,
+  clipBody,
 }: {
   open: boolean;
   onClose: () => void;
@@ -86,6 +88,10 @@ export function Modal({
   footer?: ReactNode;
   width?: string;
   bare?: boolean;
+  /** Phones: fill the screen like a native camera sheet instead of a dialog. */
+  fullScreenMobile?: boolean;
+  /** The body manages its own layout: no scrolling, it takes the full height. */
+  clipBody?: boolean;
 }) {
   useEffect(() => {
     if (!open) return;
@@ -102,10 +108,19 @@ export function Modal({
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-end justify-center sm:items-center">
-      <div className="absolute inset-0 animate-fade bg-black/70 backdrop-blur-[3px]" onClick={onClose} />
       <div
         className={clsx(
-          "animate-pop relative z-10 flex max-h-[94dvh] w-full min-w-0 flex-col overflow-hidden rounded-t-2xl border border-line2 bg-panel shadow-2xl sm:rounded-2xl",
+          "absolute inset-0 animate-fade bg-black/70 backdrop-blur-[3px]",
+          fullScreenMobile && "max-sm:hidden"
+        )}
+        onClick={onClose}
+      />
+      <div
+        className={clsx(
+          "animate-pop relative z-10 flex w-full min-w-0 flex-col overflow-hidden border border-line2 bg-panel shadow-2xl",
+          fullScreenMobile
+            ? "h-[100dvh] max-h-[100dvh] rounded-none border-0 sm:h-auto sm:max-h-[94dvh] sm:rounded-2xl sm:border"
+            : "max-h-[94dvh] rounded-t-2xl sm:rounded-2xl",
           width
         )}
       >
@@ -118,8 +133,18 @@ export function Modal({
             <X size={17} />
           </IconButton>
         </div>
-        <div className={clsx("scroll-thin min-h-0 min-w-0 flex-1 overflow-y-auto overflow-x-hidden", bare ? "" : "p-5")}>{children}</div>
-        {footer ? <div className="border-t border-line bg-panel px-5 py-3.5">{footer}</div> : null}
+        <div
+          className={clsx(
+            "min-h-0 min-w-0 flex-1",
+            clipBody ? "flex flex-col overflow-hidden" : "scroll-thin overflow-y-auto overflow-x-hidden",
+            bare ? "" : "p-5"
+          )}
+        >
+          {children}
+        </div>
+        {footer ? (
+          <div className="border-t border-line bg-panel px-5 py-3.5 pb-[max(0.875rem,env(safe-area-inset-bottom))]">{footer}</div>
+        ) : null}
       </div>
     </div>
   );

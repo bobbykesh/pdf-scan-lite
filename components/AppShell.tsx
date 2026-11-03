@@ -60,7 +60,9 @@ function Workspace() {
 
   const toast = useCallback((text: string, kind: Toast["kind"] = "ok") => {
     const id = uid("t");
-    setToasts((prev) => [...prev.slice(-1), { id, kind, text }]);
+    // Only ever show one message: stacking two banners over the document
+    // hides the top of the page on phones, and the older line is stale anyway.
+    setToasts([{ id, kind, text }]);
     setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4200);
   }, []);
 
@@ -68,8 +70,17 @@ function Workspace() {
   useEffect(() => {
     const onReady = () =>
       toast("Saved for offline use — the scanner now works without a signal.", "ok");
+    // A new build downloaded itself and is waiting: offer a one-tap refresh
+    // instead of reloading underneath the user (never interrupt mid-scan).
+    const onUpdate = () => {
+      toast("A new version is ready — tap to refresh.", "ok");
+    };
     window.addEventListener("pdfsl:offline-ready", onReady);
-    return () => window.removeEventListener("pdfsl:offline-ready", onReady);
+    window.addEventListener("pdfsl:update-ready", onUpdate);
+    return () => {
+      window.removeEventListener("pdfsl:offline-ready", onReady);
+      window.removeEventListener("pdfsl:update-ready", onUpdate);
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const open = useCallback((m: ModalKind, p?: unknown) => {
@@ -241,7 +252,7 @@ function Workspace() {
         ) : null}
 
         {/* toasts */}
-        <div className="pointer-events-none fixed bottom-[calc(4.5rem+env(safe-area-inset-bottom))] left-1/2 z-[60] flex w-full max-w-sm -translate-x-1/2 flex-col gap-2 px-4 lg:bottom-4">
+        <div className="pointer-events-none fixed left-1/2 top-[calc(3.6rem+env(safe-area-inset-top))] z-[60] flex w-full max-w-sm -translate-x-1/2 flex-col gap-2 px-4 lg:bottom-4 lg:top-auto">
           {toasts.map((t) => (
             <div
               key={t.id}

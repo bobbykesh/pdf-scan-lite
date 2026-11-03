@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useState, useSyncExternalStore } from "react";
 import {
   DndContext,
   KeyboardSensor,
@@ -49,6 +49,8 @@ function PageThumb({
   onDelete,
   onDuplicate,
   onRotate,
+  selectMode,
+  touch,
 }: {
   index: number;
   id: string;
@@ -62,6 +64,10 @@ function PageThumb({
   onDelete: () => void;
   onDuplicate: () => void;
   onRotate: () => void;
+  /** In select mode pick-toggles must always be visible (there is no hover on a phone). */
+  selectMode: boolean;
+  /** Coarse pointer: never rely on :hover to reveal a control. */
+  touch: boolean;
 }) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id });
   const style = {
@@ -75,11 +81,14 @@ function PageThumb({
       <div
         {...attributes}
         {...listeners}
-        onClick={onSelect}
+        onClick={selectMode ? onCheck : onSelect}
+        aria-selected={selectMode ? checked : selected}
         className={`relative cursor-pointer rounded-lg border p-1.5 transition-all ${
-          selected
-            ? "border-accent bg-accent/10 shadow-[0_0_0_1px_rgba(109,124,255,.35)]"
-            : "border-transparent hover:border-line2 hover:bg-panel2"
+          checked && selectMode
+            ? "border-accent bg-accent/15 shadow-[0_0_0_2px_rgba(109,124,255,.45)]"
+            : selected
+              ? "border-accent bg-accent/10 shadow-[0_0_0_1px_rgba(109,124,255,.35)]"
+              : "border-transparent hover:border-line2 hover:bg-panel2"
         }`}
       >
         <div className="relative overflow-hidden rounded-[3px] bg-white/5" style={{ aspectRatio: String(aspect || 0.707) }}>
@@ -97,7 +106,11 @@ function PageThumb({
               OCR
             </span>
           ) : null}
-          <div className="absolute inset-x-0 bottom-0 flex justify-center gap-0.5 bg-gradient-to-t from-black/75 to-transparent p-1 opacity-0 transition-opacity group-hover:opacity-100">
+          <div
+            className={`absolute inset-x-0 bottom-0 flex justify-center gap-0.5 bg-gradient-to-t from-black/75 to-transparent p-1 transition-opacity ${
+              touch && selected ? "opacity-100" : "opacity-0 group-hover:opacity-100 group-focus-within:opacity-100"
+            }`}
+          >
             <button
               onClick={(e) => {
                 e.stopPropagation();
@@ -131,10 +144,16 @@ function PageThumb({
           </div>
         </div>
       </div>
-      <div className="absolute -left-0.5 top-1.5 opacity-0 transition-opacity group-hover:opacity-100">
+      <div
+        className={`absolute left-1 top-1 transition-opacity ${
+          selectMode || touch || checked
+            ? "opacity-100"
+            : "opacity-0 group-hover:opacity-100 focus-within:opacity-100"
+        }`}
+      >
         <Checkbox.Root checked={checked} onChange={onCheck} />
       </div>
-      <div className="absolute -right-1 top-1/2 hidden -translate-y-1/2 cursor-grab text-dim group-hover:block">
+      <div className="absolute -right-1 top-1/2 hidden -translate-y-1/2 cursor-grab text-dim group-hover:block max-lg:hidden">
         <GripVertical size={13} />
       </div>
     </div>
@@ -146,6 +165,21 @@ export default function Thumbnails() {
   const shell = useShell();
   const [checked, setChecked] = useState<Set<string>>(new Set());
   const [selectMode, setSelectMode] = useState(false);
+
+  /**
+   * Phones never fire :hover, so anything revealed by hover is invisible there.
+   * Treat coarse pointers (and narrow screens) as touch and show those controls
+   * outright instead of hiding them.
+   */
+  const touch = useSyncExternalStore(
+    (cb) => {
+      const mq = window.matchMedia("(hover: none), (pointer: coarse)");
+      mq.addEventListener("change", cb);
+      return () => mq.removeEventListener("change", cb);
+    },
+    () => window.matchMedia("(hover: none), (pointer: coarse)").matches,
+    () => false
+  );
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -201,24 +235,30 @@ export default function Thumbnails() {
       </div>
 
       {selectMode ? (
-        <div className="flex items-center justify-between gap-1 border-b border-line bg-panel2 px-2 py-1.5 text-[11px]">
-          <span className="text-muted">{checked.size} selected</span>
-          <div className="flex gap-1">
+        <div className="border-b border-line bg-panel2 px-2 py-2">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-[12px] font-medium text-ink">
+              {checked.size ? `${checked.size} selected` : "Tap pages to select"}
+            </span>
             <button
-              className="rounded px-1.5 py-0.5 text-ink/80 hover:bg-panel3"
-              onClick={() => setChecked(new Set(ids))}
+              className="rounded-md border border-line2 px-2 py-1 text-[11.5px] text-ink/80 hover:bg-panel3"
+              onClick={() =>
+                setChecked(checked.size === ids.length ? new Set() : new Set(ids))
+              }
             >
-              All
+              {checked.size === ids.length ? "None" : "Select all"}
             </button>
+          </div>
+          <div className="mt-1.5 grid grid-cols-2 gap-1.5">
             <button
-              className="rounded px-1.5 py-0.5 text-bad hover:bg-bad/15 disabled:opacity-40"
+              className="rounded-lg border border-bad/40 bg-bad/10 py-2 text-[12px] font-medium text-bad transition-colors hover:bg-bad/20 disabled:opacity-40"
               disabled={!checked.size}
               onClick={() => removePages([...checked])}
             >
               Delete
             </button>
             <button
-              className="rounded px-1.5 py-0.5 text-accent hover:bg-accent/15 disabled:opacity-40"
+              className="rounded-lg border border-accent/40 bg-accent/10 py-2 text-[12px] font-medium text-accent transition-colors hover:bg-accent/20 disabled:opacity-40"
               disabled={!checked.size}
               onClick={() => {
                 shell.open("export", { only: [...checked] });
@@ -266,6 +306,8 @@ export default function Thumbnails() {
                       });
                     }}
                     onRotate={() => store.rotatePage(p.id, 1)}
+                    selectMode={selectMode}
+                    touch={touch}
                   />
                 );
               })}

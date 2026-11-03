@@ -1,5 +1,6 @@
 "use client";
 
+import { useEffect, useRef } from "react";
 import {
   Baseline,
   Eraser,
@@ -31,9 +32,35 @@ export default function ToolRail() {
   const store = useStore();
   const shell = useShell();
   const { tool, setTool, tools, setTools } = store;
+  const railRef = useRef<HTMLDivElement | null>(null);
+
+  /**
+   * Publish the rail's real height as `--rail-h` so the page area can reserve
+   * exactly that much space. Without it the floating rail sits ON TOP of the
+   * bottom of the page — very noticeable on short screens and on landscape
+   * pages, where the document ends right where the rail begins.
+   */
+  useEffect(() => {
+    const el = railRef.current;
+    if (!el) return;
+    const apply = () => {
+      const h = Math.ceil(el.getBoundingClientRect().height);
+      document.documentElement.style.setProperty("--rail-h", `${h}px`);
+    };
+    apply();
+    const ro = new ResizeObserver(apply);
+    ro.observe(el);
+    return () => {
+      ro.disconnect();
+      document.documentElement.style.removeProperty("--rail-h");
+    };
+  }, []);
 
   return (
-    <div className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col items-center gap-2 pb-3">
+    <div
+      ref={railRef}
+      className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col items-center gap-2 pb-3"
+    >
       {/* contextual options */}
       {tool !== "select" ? (
         <div className="pointer-events-auto animate-pop flex max-w-[min(94vw,640px)] flex-wrap items-center gap-x-4 gap-y-2 rounded-xl border border-line2 bg-panel/95 px-3 py-2 shadow-xl backdrop-blur">

@@ -40,7 +40,9 @@ export default function Viewport({ onEditWord }: { onEditWord: (word: OcrWord, p
   const pointerStart = useRef<Point | null>(null);
   const [zoom, setZoom] = useState(1);
   const [fit, setFit] = useState(true);
-  const [containerW, setContainerW] = useState(900);
+  const padRef = useRef<HTMLDivElement | null>(null);
+  /** Bumped whenever the page area is re-measured, to recompute the fit. */
+  const [layoutTick, setLayoutTick] = useState(0);
   const [dims, setDims] = useState<{ w: number; h: number } | null>(null);
   const [imgPoint, setImgPoint] = useState<Point | null>(null);
   const [, setRenderTick] = useState(0);
@@ -60,22 +62,56 @@ export default function Viewport({ onEditWord }: { onEditWord: (word: OcrWord, p
 
   useEffect(() => {
     const el = scrollRef.current;
+    const pad = padRef.current;
     if (!el) return;
-    const ro = new ResizeObserver(() => setContainerW(el.clientWidth));
+    const bump = () => setLayoutTick((t) => t + 1);
+    bump();
+    const ro = new ResizeObserver(bump);
     ro.observe(el);
-    setContainerW(el.clientWidth);
-    return () => ro.disconnect();
+    if (pad) ro.observe(pad); // the tool rail's reserved height lives in this padding
+    const onOrient = () => bump();
+    window.addEventListener("orientationchange", onOrient);
+    window.addEventListener("resize", onOrient);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener("orientationchange", onOrient);
+      window.removeEventListener("resize", onOrient);
+    };
   }, []);
 
   const ptSize = page ? displaySize(page) : { w: 595, h: 842 };
 
+  /**
+   * Fit-to-view uses the *measured* size of the page area.
+   *
+   * This used to subtract a guessed 190px of chrome from `window.innerHeight`.
+   * On a phone that guess is far too small (top bar + page strip + tool rail +
+   * the bottom action bar are much taller), so a page was laid out taller than
+   * its container and the bottom got clipped — most obvious on landscape pages
+   * and when the phone itself is held sideways.
+   *
+   * The values are read from the DOM each time the area is re-measured
+   * (`layoutTick`), so the padding that reserves room for the floating tool
+   * rail is always the current one.
+   */
   const { widthPx, heightPx } = useMemo(() => {
-    const availW = Math.max(240, containerW - 56);
-    const availH = Math.max(320, (typeof window !== "undefined" ? window.innerHeight : 900) - 190);
+    const el = scrollRef.current;
+    const pad = padRef.current;
+    const px = (v: string) => parseFloat(v) || 0;
+    const cs = pad ? getComputedStyle(pad) : null;
+    const cw = el ? el.clientWidth - (cs ? px(cs.paddingLeft) + px(cs.paddingRight) : 0) : 900;
+    const ch = el ? el.clientHeight - (cs ? px(cs.paddingTop) + px(cs.paddingBottom) : 0) : 600;
+    const availW = Math.max(120, cw);
+    const availH = Math.max(120, ch);
     const fitScale = Math.min(availW / ptSize.w, availH / ptSize.h);
     const scale = fit ? fitScale : fitScale * zoom;
-    return { widthPx: Math.max(120, Math.round(ptSize.w * scale)), heightPx: Math.max(120, Math.round(ptSize.h * scale)) };
-  }, [containerW, ptSize.w, ptSize.h, fit, zoom]);
+    return {
+      widthPx: Math.max(80, Math.round(ptSize.w * scale)),
+      heightPx: Math.max(80, Math.round(ptSize.h * scale)),
+    };
+    // layoutTick re-reads the DOM after resizes / orientation changes
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [layoutTick, ptSize.w, ptSize.h, fit, zoom]);
 
   // reset zoom when the page changes
   useEffect(() => {
@@ -499,7 +535,11 @@ export default function Viewport({ onEditWord }: { onEditWord: (word: OcrWord, p
           if (f) placeImage(f);
         }}
       >
-        <div className="flex min-h-full items-start justify-center p-6 pb-28" onClick={() => tool === "select" && store.setSelectedId(null)}>
+        <div
+          ref={padRef}
+          className="flex min-h-full items-center justify-center p-4 pb-[calc(var(--rail-h,88px)+1rem)] lg:items-start lg:p-6 lg:pb-[calc(var(--rail-h,88px)+1.5rem)]"
+          onClick={() => tool === "select" && store.setSelectedId(null)}
+        >
           <div
             ref={stageRef}
             className="paper-shadow relative select-none"

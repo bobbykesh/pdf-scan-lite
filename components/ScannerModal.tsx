@@ -21,7 +21,6 @@ import { Button, IconButton, Modal, Segmented } from "./ui";
 import {
   applyScanFilterToCopy,
   captureFrame,
-  cropPreviewUrl,
   detectDocumentCornersDetailed,
   filteredPreviewUrl,
   rotateCanvas,
@@ -146,11 +145,15 @@ export default function ScannerModal() {
 
   // Downscaled JPEGs, computed only when the input actually changes.
   const rawPreview = useMemo(() => (raw ? filteredPreviewUrl(raw, "original", 1000, 0.85) : ""), [raw]);
-  // The crop preview is rendered at the selection's true aspect ratio, so the
-  // page is never stretched while the user adjusts the corners.
+  /**
+   * The crop stage needs the WHOLE capture at its native aspect ratio: the
+   * corner handles are positioned against the full frame, so any other aspect
+   * would make the handles drift away from the page. (The un-squeezed preview
+   * below is a separate thing — see `cropPreviewUrl` usage in review mode.)
+   */
   const cropPreview = useMemo(
-    () => (raw ? cropPreviewUrl(raw, corners ?? FULL_QUAD(raw.width, raw.height), filter, 1100, 0.86) : ""),
-    [raw, corners, filter]
+    () => (raw ? filteredPreviewUrl(raw, filter, 1100, 0.86) : ""),
+    [raw, filter]
   );
   const reviewPreview = useMemo(() => {
     if (!cropped) return "";
@@ -275,6 +278,8 @@ export default function ScannerModal() {
       subtitle={subtitle}
       width="max-w-4xl"
       bare
+      fullScreenMobile
+      clipBody
       footer={
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-1.5 text-[11.5px] text-muted">
@@ -329,14 +334,23 @@ export default function ScannerModal() {
         </div>
       }
     >
-      <div className={mode === "crop" ? "bg-[#06080d] p-3 sm:p-4" : "bg-[#06080d] p-4 sm:p-5"}
-        style={mode === "crop" ? { height: "min(62dvh, 560px)" } : undefined}
+      <div
+        className={
+          mode === "capture"
+            ? "flex min-h-0 flex-1 flex-col bg-black p-0 sm:p-4"
+            : "flex min-h-0 flex-1 flex-col bg-[#06080d] p-3 sm:p-4"
+        }
       >
         {mode === "capture" ? (
-          <div className="relative mx-auto max-w-3xl">
+          <div className="relative mx-auto flex min-h-0 w-full max-w-3xl flex-1 flex-col">
+            {/*
+              Phones: the viewfinder IS the sheet (full-bleed, tall) so the
+              document can be framed from a normal distance — the old 4:3 box
+              was so short that people had to step back to fit a page in.
+              Larger screens keep the 4:3 frame, which matches the capture.
+            */}
             <div
-              className="relative mx-auto aspect-[4/3] w-full overflow-hidden rounded-xl border border-line2 bg-black"
-              style={{ maxHeight: "min(56dvh, 520px)" }}
+              className="relative mx-auto min-h-0 w-full flex-1 overflow-hidden bg-black max-lg:rounded-none lg:aspect-[4/3] lg:h-auto lg:max-h-[min(56dvh,520px)] lg:flex-none lg:rounded-xl lg:border lg:border-line2"
             >
               <video ref={videoRef} playsInline muted autoPlay className="h-full w-full object-contain" />
               {flash ? <div className="absolute inset-0 bg-white" /> : null}
@@ -384,7 +398,7 @@ export default function ScannerModal() {
                 </IconButton>
               </div>
             </div>
-            <div className="mt-3 flex flex-wrap items-center justify-center gap-3 text-[11.5px] text-muted">
+            <div className="mt-3 flex flex-wrap items-center justify-center gap-3 text-[11.5px] text-muted max-sm:hidden">
               <label className="flex cursor-pointer items-center gap-1.5">
                 <input
                   type="checkbox"
