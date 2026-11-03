@@ -151,6 +151,8 @@ export default function CropStage({
 }) {
   const shellRef = useRef<HTMLDivElement | null>(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
+  /** The shell's own size — the card is positioned against this, not the frame. */
+  const [shell, setShell] = useState({ w: 0, h: 0 });
   /** Where the image actually sits inside the 4:3 frame (letterboxed). */
   const [fit, setFit] = useState({ x: 0, y: 0, w: 0, h: 0 });
   const drag = useRef<{
@@ -194,6 +196,7 @@ export default function CropStage({
     if (!el) return;
     const measure = () => {
       const rect = el.getBoundingClientRect();
+      setShell({ w: Math.round(rect.width), h: Math.round(rect.height) });
       // Fit the 4:3 viewfinder inside the available space.
       const maxW = rect.width;
       const maxH = rect.height;
@@ -379,12 +382,81 @@ export default function CropStage({
    * put it on top of a corner handle. It now sits in the shell's corner on the
    * opposite side to the loupe, clear of every handle.
    */
-  const thumbSide = touch
-    ? {
-        left: loupe && loupe.cx < box.w / 2 ? box.w - 124 : 4,
-        top: loupe && loupe.cy < box.h / 2 ? box.h - 116 : 4,
+  /*
+   * Card placement.
+   *
+   * The card must never sit on a grip. Anchoring it to the shell's corners
+   * was not enough: the 4:3 frame fills the shell, so with a near-full-frame
+   * crop the four shell corners *are* the four corner grips — and on a phone
+   * the earlier frame-local offsets put the card inside the frame entirely.
+   *
+   * So placement is solved, not guessed: scan the shell on a coarse grid for
+   * a spot whose box clears every grip, the loupe and the finger, and pick the
+   * one furthest from the point being worked on. If nothing is clear (a very
+   * short viewport whose crop is full-bleed) the card is hidden rather than
+   * parked on a handle.
+   */
+  const CARD_W = 122;
+  // Deliberately larger than the rendered card (measured 80–108px tall): a
+  // generous box errs towards hiding the card, never towards covering a grip.
+  const CARD_H = 114;
+  const thumbSide = (() => {
+    const sw = shell.w || box.w;
+    const sh = shell.h || box.h;
+    if (!sw || !sh || sw < CARD_W + 12 || sh < CARD_H + 12) return { left: 0, top: 0, hidden: true };
+
+    // Frame origin inside the shell (the frame is centred in it).
+    const fx = (sw - box.w) / 2;
+    const fy = (sh - box.h) / 2;
+    const toShell = (p: Point) => ({
+      x: fx + fit.x + (p.x / width) * fit.w,
+      y: fy + fit.y + (p.y / height) * fit.h,
+    });
+    const grips = [...corners, ...edges].map(toShell);
+
+    // Tappable sockets are 44px; pad so a thumb aiming at the socket edge
+    // still lands on the grip.
+    const GRIP = 56;
+    const obs: { x: number; y: number; r: number }[] = grips.map((g) => ({ ...g, r: GRIP / 2 }));
+    // The loupe and the fingertip are work-in-progress areas too.
+    if (loupe) obs.push({ x: loupe.cx, y: loupe.cy, r: LOUPE_SIZE / 2 + 6 });
+    if (touch) obs.push({ x: touch.x, y: touch.y, r: 34 });
+
+    const m = 6;
+    const maxX = sw - CARD_W - m;
+    const maxY = sh - CARD_H - m;
+    const STEP = 8;
+
+    let best: { left: number; top: number } | null = null;
+    let bestScore = -Infinity;
+    const focus = touch ?? (loupe ? { x: loupe.cx, y: loupe.cy } : { x: sw / 2, y: sh / 2 });
+
+    for (let y = m; y <= maxY; y += STEP) {
+      for (let x = m; x <= maxX; x += STEP) {
+        const cx = x + CARD_W / 2;
+        const cy = y + CARD_H / 2;
+        let clear = true;
+        for (const o of obs) {
+          // Circle vs axis-aligned box.
+          const nx = Math.max(x, Math.min(o.x, x + CARD_W));
+          const ny = Math.max(y, Math.min(o.y, y + CARD_H));
+          if ((nx - o.x) ** 2 + (ny - o.y) ** 2 < o.r * o.r) {
+            clear = false;
+            break;
+          }
+        }
+        if (!clear) continue;
+        // Favour spots far from the finger so the card never crowds the grip
+        // in use; break ties by staying near the top of the shell.
+        const score = Math.hypot(cx - focus.x, cy - focus.y) - y * 0.15;
+        if (score > bestScore) {
+          bestScore = score;
+          best = { left: x, top: y };
+        }
       }
-    : { left: 4, top: 4 };
+    }
+    return best ? { ...best, hidden: false } : { left: m, top: m, hidden: true };
+  })();
 
   return (
     <div ref={shellRef} className="relative flex h-full w-full items-center justify-center">
@@ -574,7 +646,7 @@ export default function CropStage({
       <CropThumb
         quad={corners}
         source={source ?? null}
-        visible={!!touch && loupeFade > 0 && !busy}
+        visible={!!touch && loupeFade > 0 && !busy && !thumbSide.hidden}
         side={thumbSide}
       />
     </div>

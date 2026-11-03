@@ -18,6 +18,9 @@ const WORK_SIDE = 340;
 /** Long edge of the thumbnail. */
 const THUMB_SIDE = 150;
 
+/** Keep in sync with CARD_W in CropStage.tsx. */
+const CARD_W = 122;
+
 export default function CropThumb({
   quad,
   source,
@@ -102,13 +105,15 @@ export default function CropThumb({
       style={{
         left: side.left,
         top: side.top,
-        maxWidth: "42vw",
+        // Fixed footprint: CropStage scores candidate slots against exactly
+        // this box, so the card and the placement maths cannot drift apart.
+        width: CARD_W,
         opacity: visible ? 1 : 0,
         transition: "opacity 140ms ease-out",
       }}
       aria-hidden
     >
-      <canvas ref={ref} className="block max-h-[84px] w-auto rounded" />
+      <canvas ref={ref} className="block max-h-[84px] w-full rounded" />
       <p className="pt-0.5 text-center text-[8px] uppercase tracking-wider text-white/55">result</p>
     </div>
   );
