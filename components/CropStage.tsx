@@ -77,6 +77,8 @@ export default function CropStage({
 }) {
   const shellRef = useRef<HTMLDivElement | null>(null);
   const [box, setBox] = useState({ w: 0, h: 0 });
+  /** Where the image actually sits inside the 4:3 frame (letterboxed). */
+  const [fit, setFit] = useState({ x: 0, y: 0, w: 0, h: 0 });
   const drag = useRef<{ index: number | "move"; start: Point; origin: Quad } | null>(null);
   const raf = useRef(0);
   const pending = useRef<Quad | null>(null);
@@ -96,7 +98,15 @@ export default function CropStage({
         h = maxH;
         w = (h * 4) / 3;
       }
-      setBox({ w: Math.max(1, Math.floor(w)), h: Math.max(1, Math.floor(h)) });
+      const bw = Math.max(1, Math.floor(w));
+      const bh = Math.max(1, Math.floor(h));
+      setBox({ w: bw, h: bh });
+
+      // contain-fit the source image inside that frame
+      const scale = Math.min(bw / width, bh / height);
+      const iw = Math.max(1, Math.round(width * scale));
+      const ih = Math.max(1, Math.round(height * scale));
+      setFit({ x: Math.round((bw - iw) / 2), y: Math.round((bh - ih) / 2), w: iw, h: ih });
     };
     measure();
     const ro = new ResizeObserver(measure);
@@ -110,15 +120,17 @@ export default function CropStage({
       const el = shellRef.current;
       if (!el) return { x: 0, y: 0 };
       const rect = el.getBoundingClientRect();
-      // The 4:3 frame is centred inside the shell.
-      const ox = rect.left + (rect.width - box.w) / 2;
-      const oy = rect.top + (rect.height - box.h) / 2;
+      // The 4:3 frame is centred inside the shell, and the image is
+      // letterboxed inside that frame — both offsets must be accounted for or
+      // the corner handles drift away from the page.
+      const ox = rect.left + (rect.width - box.w) / 2 + fit.x;
+      const oy = rect.top + (rect.height - box.h) / 2 + fit.y;
       return {
-        x: clamp(((clientX - ox) / box.w) * width, 0, width),
-        y: clamp(((clientY - oy) / box.h) * height, 0, height),
+        x: clamp(((clientX - ox) / Math.max(1, fit.w)) * width, 0, width),
+        y: clamp(((clientY - oy) / Math.max(1, fit.h)) * height, 0, height),
       };
     },
-    [box.h, box.w, height, width]
+    [box.h, box.w, fit.h, fit.w, fit.x, fit.y, height, width]
   );
 
   /** Coalesce pointer moves into one state update per animation frame. */
@@ -199,14 +211,16 @@ export default function CropStage({
           <img
             src={preview}
             alt="Captured page"
-            className="pointer-events-none absolute inset-0 h-full w-full object-fill"
+            className="pointer-events-none absolute max-w-none select-none"
+            style={{ left: fit.x, top: fit.y, width: fit.w, height: fit.h }}
             draggable={false}
           />
         </div>
 
         {/* Dim everything outside the selection. */}
         <svg
-          className="pointer-events-none absolute inset-0 h-full w-full"
+          className="pointer-events-none absolute"
+          style={{ left: fit.x, top: fit.y, width: fit.w, height: fit.h }}
           viewBox={`0 0 ${width} ${height}`}
           preserveAspectRatio="none"
         >
@@ -236,7 +250,8 @@ export default function CropStage({
 
         {/* Quadrant guides inside the selection. */}
         <svg
-          className="pointer-events-none absolute inset-0 h-full w-full opacity-40"
+          className="pointer-events-none absolute opacity-40"
+          style={{ left: fit.x, top: fit.y, width: fit.w, height: fit.h }}
           viewBox={`0 0 ${width} ${height}`}
           preserveAspectRatio="none"
         >
@@ -289,7 +304,7 @@ export default function CropStage({
               );
             }}
             className="absolute z-20 grid h-11 w-11 -translate-x-1/2 -translate-y-1/2 cursor-grab touch-none place-items-center rounded-full active:cursor-grabbing"
-            style={{ left: px(c.x, width), top: px(c.y, height) }}
+            style={{ left: fit.x + (c.x / width) * fit.w, top: fit.y + (c.y / height) * fit.h }}
           >
             <span className="grid h-[22px] w-[22px] place-items-center rounded-full border-[3px] border-white bg-accent shadow-[0_2px_10px_rgba(0,0,0,0.55)] transition-transform duration-100 ease-out active:scale-125" />
           </div>
@@ -302,7 +317,7 @@ export default function CropStage({
           onPointerUp={end}
           onPointerCancel={end}
           className="absolute z-10 grid h-12 w-12 -translate-x-1/2 -translate-y-1/2 cursor-move touch-none place-items-center rounded-full border border-white/25 bg-black/45 text-white/90 backdrop-blur-sm transition-colors hover:bg-black/60"
-          style={{ left: px(centre.x, width), top: px(centre.y, height) }}
+          style={{ left: fit.x + (centre.x / width) * fit.w, top: fit.y + (centre.y / height) * fit.h }}
           title="Drag to move the whole crop"
         >
           <Move size={18} />

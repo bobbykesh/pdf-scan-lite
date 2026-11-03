@@ -204,6 +204,34 @@ function sideLengths(q: [Point, Point, Point, Point]): number[] {
  * corners from the extreme points of that region (min/max of x+y and x−y),
  * which recovers rotation and keystone distortion instead of boxing it.
  */
+/**
+ * Find the page as a true four-point quad.
+ *
+ * Why this is not a simple threshold any more
+ * ------------------------------------------
+ * The old version thresholded the whole frame with Otsu and took the extreme
+ * points of the largest connected blob. On a real photo that fails badly:
+ *
+ *   • a bright floor / wall / specular highlight joins the paper into one blob,
+ *     so the "page" was reported as a quad covering half the floor;
+ *   • a dark or glossy card (an ID, a laminated sheet) is *darker* than the
+ *     floor, so the bright-document assumption is inverted;
+ *   • Otsu computed from the full histogram is skewed by the background.
+ *
+ * The replacement works the way phone scanner apps do:
+ *
+ *   1. work on a small greyscale copy (320px wide) for speed;
+ *   2. threshold *locally* (generous Otsu) and then knock out anything touching
+ *      the frame border — the document is the big object in the middle, not
+ *      the desk/carpet that runs off every edge;
+ *   3. score every remaining component by how paper-like it is (area,
+ *      rectangularity, aspect ratio) and keep the best;
+ *   4. take the convex hull, simplify it to four points with Douglas–Peucker,
+ *      and fit minimum-area rectangle corners to that hull so the quad follows
+ *      the sheet's real edges instead of a few noisy extreme pixels;
+ *   5. refine each corner against the image gradient, which snaps the handles
+ *      onto the printed border.
+ */
 export function detectDocumentCornersDetailed(source: HTMLCanvasElement): QuadDetection {
   const W = 320;
   const H = Math.max(1, Math.round((source.height / source.width) * W));
@@ -221,144 +249,537 @@ export function detectDocumentCornersDetailed(source: HTMLCanvasElement): QuadDe
     lum[p] = l;
     hist[l | 0]++;
   }
-  const t = otsu(hist, W * H);
 
-  // Paper is usually brighter than its surroundings — decide per image.
-  let border = 0;
-  let borderN = 0;
-  const inset = Math.max(1, Math.round(Math.min(W, H) * 0.04));
-  for (let y = 0; y < H; y++) {
-    for (let x = 0; x < W; x++) {
-      if (x < inset || y < inset || x >= W - inset || y >= H - inset) {
-        border += lum[y * W + x];
-        borderN++;
-      }
-    }
-  }
-  let centre = 0;
-  let centreN = 0;
-  for (let y = Math.round(H * 0.3); y < Math.round(H * 0.7); y++) {
-    for (let x = Math.round(W * 0.3); x < Math.round(W * 0.7); x++) {
-      centre += lum[y * W + x];
-      centreN++;
-    }
-  }
-  const brightDoc = centre / Math.max(1, centreN) > border / Math.max(1, borderN);
+  const toSource = (x: number, y: number): Point => ({
+    x: Math.min(source.width, Math.max(0, (x / W) * source.width)),
+    y: Math.min(source.height, Math.max(0, (y / H) * source.height)),
+  });
 
-  const mask = new Uint8Array(W * H);
-  for (let p = 0; p < mask.length; p++) {
-    const on = brightDoc ? lum[p] > t : lum[p] < t;
-    mask[p] = on ? 1 : 0;
-  }
-
-  // Largest connected component.
-  const seen = new Uint8Array(W * H);
-  let bestPixels: number[] = [];
-  const stack: number[] = [];
-  for (let p0 = 0; p0 < mask.length; p0++) {
-    if (!mask[p0] || seen[p0]) continue;
-    const pixels: number[] = [];
-    stack.length = 0;
-    stack.push(p0);
-    seen[p0] = 1;
-    while (stack.length) {
-      const p = stack.pop()!;
-      pixels.push(p);
-      const x = p % W;
-      const y = (p - x) / W;
-      if (x > 0 && mask[p - 1] && !seen[p - 1]) { seen[p - 1] = 1; stack.push(p - 1); }
-      if (x < W - 1 && mask[p + 1] && !seen[p + 1]) { seen[p + 1] = 1; stack.push(p + 1); }
-      if (y > 0 && mask[p - W] && !seen[p - W]) { seen[p - W] = 1; stack.push(p - W); }
-      if (y < H - 1 && mask[p + W] && !seen[p + W]) { seen[p + W] = 1; stack.push(p + W); }
-    }
-    if (pixels.length > bestPixels.length) bestPixels = pixels;
-  }
-
-  const covered = bestPixels.length / (W * H);
-  // Too small to be a page, or so large it is obviously the whole frame.
-  if (covered < 0.08 || covered > 0.985) {
-    return {
-      corners: FULL_FRAME(source.width, source.height),
-      confidence: 0,
-      found: false,
-    };
-  }
-
-  // Perspective corners from the extreme points of the region.
-  let tl = 0, tr = 0, br = 0, bl = 0;
-  let minSum = Infinity, maxSum = -Infinity, minDiff = Infinity, maxDiff = -Infinity;
-  for (const p of bestPixels) {
-    const x = p % W;
-    const y = (p - x) / W;
-    const sum = x + y;
-    const diff = x - y;
-    if (sum < minSum) { minSum = sum; tl = p; }
-    if (sum > maxSum) { maxSum = sum; br = p; }
-    if (diff > maxDiff) { maxDiff = diff; tr = p; }
-    if (diff < minDiff) { minDiff = diff; bl = p; }
-  }
-
-  const toSource = (p: number): Point => {
-    const x = p % W;
-    const y = (p - x) / W;
-    return {
-      x: Math.min(source.width, Math.max(0, (x / W) * source.width)),
-      y: Math.min(source.height, Math.max(0, (y / H) * source.height)),
-    };
-  };
-
-  const quad = [toSource(tl), toSource(tr), toSource(br), toSource(bl)] as [Point, Point, Point, Point];
-
-  // Refine each corner outward a little so it sits on the page edge rather than
-  // one radius inside the filled region.
-  const refine = (corner: Point, dirX: number, dirY: number, radius: number): Point => {
-    const cx = Math.round((corner.x / source.width) * W);
-    const cy = Math.round((corner.y / source.height) * H);
-    let bestX = cx;
-    let bestY = cy;
-    let bestScore = -Infinity;
-    for (let dy = -radius; dy <= radius; dy++) {
-      for (let dx = -radius; dx <= radius; dx++) {
-        const x = cx + dx;
-        const y = cy + dy;
-        if (x < 0 || y < 0 || x >= W || y >= H) continue;
-        if (!mask[y * W + x]) continue;
-        const score = dx * dirX + dy * dirY;
-        if (score > bestScore) { bestScore = score; bestX = x; bestY = y; }
-      }
-    }
-    return {
-      x: Math.min(source.width, Math.max(0, (bestX / W) * source.width)),
-      y: Math.min(source.height, Math.max(0, (bestY / H) * source.height)),
-    };
-  };
-  const r = Math.max(3, Math.round(W * 0.03));
-  quad[0] = refine(quad[0], -1, -1, r);
-  quad[1] = refine(quad[1], 1, -1, r);
-  quad[2] = refine(quad[2], 1, 1, r);
-  quad[3] = refine(quad[3], -1, 1, r);
-
-  const area = quadArea(quad);
   const frameArea = source.width * source.height;
-  const sides = sideLengths(quad);
-  const minSide = Math.min(...sides);
-  const valid =
-    isConvex(quad) &&
-    area > frameArea * 0.06 &&
-    area < frameArea * 0.999 &&
-    minSide > Math.min(source.width, source.height) * 0.06;
+  const fallback: QuadDetection = {
+    corners: FULL_FRAME(source.width, source.height),
+    confidence: 0,
+    found: false,
+  };
 
-  if (!valid) {
-    return { corners: FULL_FRAME(source.width, source.height), confidence: 0, found: false };
+  /* ---------------------------------------------------------- candidates */
+
+  /**
+   * Build a mask of "document-ish" pixels at an absolute luminance threshold.
+   * `brightDoc` picks the polarity: paper brighter than its surroundings, or
+   * darker (a dark card, a laminated ID, a phone screen).
+   */
+  const buildMask = (brightDoc: boolean, t: number): Uint8Array => {
+    const m = new Uint8Array(W * H);
+    for (let p = 0; p < m.length; p++) {
+      m[p] = (brightDoc ? lum[p] > t : lum[p] < t) ? 1 : 0;
+    }
+    return m;
+  };
+
+  /**
+   * Remove large components that touch the border of the frame.
+   *
+   * A sheet lying in the middle of a photo never reaches the edge; floors,
+   * walls, tabletops and shadows almost always do. This is the single most
+   * effective guard against "the crop took half the room".
+   */
+  const dropBorderComponents = (mask: Uint8Array): Uint8Array => {
+    const seen = new Uint8Array(W * H);
+    const stack: number[] = [];
+    const out = mask.slice();
+    for (let p0 = 0; p0 < mask.length; p0++) {
+      if (!mask[p0] || seen[p0]) continue;
+      const pixels: number[] = [];
+      let touches = false;
+      stack.length = 0;
+      stack.push(p0);
+      seen[p0] = 1;
+      while (stack.length) {
+        const p = stack.pop()!;
+        pixels.push(p);
+        const x = p % W;
+        const y = (p - x) / W;
+        if (x === 0 || y === 0 || x === W - 1 || y === H - 1) touches = true;
+        if (x > 0 && mask[p - 1] && !seen[p - 1]) { seen[p - 1] = 1; stack.push(p - 1); }
+        if (x < W - 1 && mask[p + 1] && !seen[p + 1]) { seen[p + 1] = 1; stack.push(p + 1); }
+        if (y > 0 && mask[p - W] && !seen[p - W]) { seen[p - W] = 1; stack.push(p - W); }
+        if (y < H - 1 && mask[p + W] && !seen[p + W]) { seen[p + W] = 1; stack.push(p + W); }
+      }
+      if (touches) {
+        for (const p of pixels) out[p] = 0;
+      }
+    }
+    return out;
+  };
+
+  /** Connected components of a mask, largest first. */
+  const components = (mask: Uint8Array): number[][] => {
+    const seen = new Uint8Array(W * H);
+    const stack: number[] = [];
+    const list: number[][] = [];
+    for (let p0 = 0; p0 < mask.length; p0++) {
+      if (!mask[p0] || seen[p0]) continue;
+      const pixels: number[] = [];
+      stack.length = 0;
+      stack.push(p0);
+      seen[p0] = 1;
+      while (stack.length) {
+        const p = stack.pop()!;
+        pixels.push(p);
+        const x = p % W;
+        const y = (p - x) / W;
+        if (x > 0 && mask[p - 1] && !seen[p - 1]) { seen[p - 1] = 1; stack.push(p - 1); }
+        if (x < W - 1 && mask[p + 1] && !seen[p + 1]) { seen[p + 1] = 1; stack.push(p + 1); }
+        if (y > 0 && mask[p - W] && !seen[p - W]) { seen[p - W] = 1; stack.push(p - W); }
+        if (y < H - 1 && mask[p + W] && !seen[p + W]) { seen[p + W] = 1; stack.push(p + W); }
+      }
+      if (pixels.length >= W * H * 0.02) list.push(pixels);
+    }
+    list.sort((a, b) => b.length - a.length);
+    return list.slice(0, 4);
+  };
+
+  /**
+   * Score a candidate quad. This is the heart of the new detector: a crop is
+   * only accepted when it *looks like a sheet* — rectangular, with a strong
+   * luminance step along all four edges, and a sane aspect ratio. Area alone is
+   * not evidence (the old code treated "big bright blob" as "the document",
+   * which is exactly how half a tiled floor became the page).
+   */
+  const scoreQuad = (quad: [Point, Point, Point, Point]): number => {
+    if (!isConvex(quad)) return -1;
+    const area = quadArea(quad);
+    const frac = area / frameArea;
+    if (frac < 0.03 || frac > 0.92) return -1;
+    const sides = sideLengths(quad);
+    const longest = Math.max(...sides);
+    const shortest = Math.min(...sides);
+    if (shortest < Math.min(source.width, source.height) * 0.05) return -1;
+    const rectFill = area / (longest * shortest); // 1 = perfect rectangle
+    const aspect = longest / Math.max(1, shortest);
+    const { mean: edge, consistency } = edgeContrast(quad, lum, W, H, source.width, source.height);
+    const areaScore = frac < 0.06 ? 0.3 : 1;
+    return (
+      rectFill * 0.26 +
+      Math.min(1, edge / 30) * 0.32 +
+      consistency * 0.22 +
+      aspectPrior(aspect) * 0.14 +
+      areaScore * 0.06
+    );
+  };
+
+  /**
+   * Adaptive (local-mean) masks.
+   *
+   * A cream card on a cream tiled floor, or a white page lit unevenly, are
+   * exactly the cases a global threshold cannot separate: paper and background
+   * land in the same histogram bucket. Comparing each pixel with the mean of
+   * its neighbourhood (via a summed-area table, so this stays O(n)) isolates a
+   * locally-brighter or locally-darker region regardless of the global level.
+   */
+  const integral = new Float64Array((W + 1) * (H + 1));
+  for (let y = 0; y < H; y++) {
+    let rowSum = 0;
+    for (let x = 0; x < W; x++) {
+      rowSum += lum[y * W + x];
+      integral[(y + 1) * (W + 1) + (x + 1)] = integral[y * (W + 1) + (x + 1)] + rowSum;
+    }
+  }
+  const localMean = (x: number, y: number, r: number): number => {
+    const x0 = Math.max(0, x - r);
+    const y0 = Math.max(0, y - r);
+    const x1 = Math.min(W - 1, x + r);
+    const y1 = Math.min(H - 1, y + r);
+    const a = integral[y0 * (W + 1) + x0];
+    const b = integral[y0 * (W + 1) + (x1 + 1)];
+    const c = integral[(y1 + 1) * (W + 1) + x0];
+    const d = integral[(y1 + 1) * (W + 1) + (x1 + 1)];
+    return (d - b - c + a) / ((x1 - x0 + 1) * (y1 - y0 + 1));
+  };
+  const buildAdaptiveMask = (brightDoc: boolean, k: number, radius: number): Uint8Array => {
+    const m = new Uint8Array(W * H);
+    for (let y = 0; y < H; y++) {
+      for (let x = 0; x < W; x++) {
+        const p = y * W + x;
+        const mean = localMean(x, y, radius);
+        const diff = lum[p] - mean;
+        const on = brightDoc ? diff > k : diff < -k;
+        m[p] = on ? 1 : 0;
+      }
+    }
+    return m;
+  };
+
+  const luminanceLevels: number[] = [];
+  {
+    // Sweep thresholds across the tonal range instead of trusting one Otsu cut.
+    // On a cream card lying on a cream floor the histogram is unimodal, so any
+    // single global threshold merges paper and floor into one blob; sweeping
+    // finds the cut that isolates the card.
+    let acc = 0;
+    const total = W * H;
+    for (let level = 0; level < 256 && luminanceLevels.length < 12; level++) {
+      acc += hist[level];
+      if (acc / total >= (luminanceLevels.length + 1) / 13) luminanceLevels.push(level);
+    }
+    // plus a few absolute levels, which catch low-contrast cards
+    for (const t of [70, 130, 190, 225, 240]) luminanceLevels.push(t);
   }
 
-  // Confidence blends coverage with how rectangular the result is.
-  const longest = Math.max(...sides);
-  const squareness = minSide / Math.max(1, longest);
-  const confidence = Math.min(1, covered / 0.5) * 0.6 + squareness * 0.4;
+  type Cand = { quad: [Point, Point, Point, Point]; score: number; area: number; covered: number };
+  const all: Cand[] = [];
 
-  return { corners: quad, confidence, found: true };
+  const masks: { mask: Uint8Array; tag: string }[] = [];
+  for (const t of luminanceLevels) {
+    masks.push({ mask: buildMask(true, t), tag: `g+${t}` });
+    masks.push({ mask: buildMask(false, t), tag: `g-${t}` });
+  }
+  for (const radius of [12, 26]) {
+    for (const k of [6, 13]) {
+      masks.push({ mask: buildAdaptiveMask(true, k, radius), tag: `a+${k}/${radius}` });
+      masks.push({ mask: buildAdaptiveMask(false, k, radius), tag: `a-${k}/${radius}` });
+    }
+  }
+
+  for (const { mask } of masks) {
+    {
+      const inner = dropBorderComponents(mask);
+      for (const pixels of components(inner)) {
+        const quad = quadFromComponent(pixels, W, H, source);
+        if (!quad) continue;
+        const score = scoreQuad(quad);
+        if (score <= 0) continue;
+        all.push({ quad, score, area: quadArea(quad), covered: pixels.length / (W * H) });
+      }
+    }
+  }
+
+  /**
+   * Pick the winner among the good candidates.
+   *
+   * A glossy card splits into two blobs (the glare and the rest), and the glare
+   * blob can score slightly higher because its boundary is a sharper gradient.
+   * Cropping to the glare is exactly the "messy scan" the user reported, so
+   * when a candidate is nearly as good as the best but much larger, take the
+   * larger one — a scanner should capture the whole sheet, not its highlight.
+   */
+  all.sort((a, b) => b.score - a.score);
+  let best: Cand | null = null;
+  if (all.length) {
+    const top = all[0];
+    best = top;
+    for (const c of all) {
+      if (c.score < top.score * 0.8) break;
+      if (c.area > best.area * 1.15) best = c;
+    }
+  }
+
+  if (!best) return fallback;
+
+  /**
+   * Snap each corner onto the real paper edge.
+   *
+   * The quad comes from a 320px-wide mask, so it is only accurate to ~4 source
+   * pixels and tends to sit a pixel or two outside the sheet, which shows up as
+   * a thin strip of floor/desk down the edges of the scan. This walks each
+   * corner along the two edges that meet there and maximises |gradient| across
+   * the edge, which lands it on the printed border.
+   */
+  const refined = refineQuadToEdges(best.quad, lum, W, H, source);
+  const rawScore2 = scoreQuad(best.quad);
+  const refScore2 = scoreQuad(refined);
+  // only take the refined corners when they are a clear improvement
+  const quad = refScore2 > rawScore2 + 0.01 ? refined : best.quad;
+  const area = quadArea(quad);
+  const sides = sideLengths(quad);
+  const longest = Math.max(...sides);
+  const shortest = Math.min(...sides);
+  const rectFill = area / (longest * shortest);
+  const aspect = longest / Math.max(1, shortest);
+  const { mean: edge, consistency } = edgeContrast(quad, lum, W, H, source.width, source.height);
+
+  /**
+   * Confidence answers one question: "is this a rectangular sheet with a real
+   * boundary?" It gates whether auto-crop is trusted at all, so a quad that
+   * swallowed the floor scores low and the caller falls back to the full frame.
+   */
+  const confidence = Math.max(
+    0,
+    Math.min(
+      1,
+      rectFill * 0.26 +
+        Math.min(1, edge / 30) * 0.32 +
+        consistency * 0.22 +
+        aspectPrior(aspect) * 0.14 +
+        0.06
+    )
+  );
+
+  const plausible = confidence >= 0.5;
+  return {
+    corners: plausible ? quad : FULL_FRAME(source.width, source.height),
+    confidence: plausible ? confidence : Math.min(confidence, 0.49),
+    found: plausible,
+  };
 }
+
+/**
+ * Move each corner of a quad onto the strongest nearby edge.
+ *
+ * For a corner, the two edges that meet there are known, so the search is 2D:
+ * a corner is tried at (du along edge A, dv along edge B) and scored by the
+ * summed absolute gradient across both edges at that point. A small search
+ * window keeps it from jumping to a different feature.
+ */
+function refineQuadToEdges(
+  quad: [Point, Point, Point, Point],
+  lum: Float32Array,
+  W: number,
+  H: number,
+  source: HTMLCanvasElement
+): [Point, Point, Point, Point] {
+  const at = (x: number, y: number): number => {
+    const xi = Math.min(W - 1, Math.max(0, Math.round(x)));
+    const yi = Math.min(H - 1, Math.max(0, Math.round(y)));
+    return lum[yi * W + xi];
+  };
+  /** gradient across the line through p1→p2, sampled at t */
+  const edgeScore = (p1: { x: number; y: number }, p2: { x: number; y: number }): number => {
+    const len = Math.hypot(p2.x - p1.x, p2.y - p1.y) || 1;
+    const nx = -(p2.y - p1.y) / len;
+    const ny = (p2.x - p1.x) / len;
+    let total = 0;
+    const steps = 20;
+    for (let i = 1; i < steps; i++) {
+      const t = i / steps;
+      const x = p1.x + (p2.x - p1.x) * t;
+      const y = p1.y + (p2.y - p1.y) * t;
+      total += Math.abs(at(x + nx * 1.6, y + ny * 1.6) - at(x - nx * 1.6, y - ny * 1.6));
+    }
+    return total / (steps - 1);
+  };
+
+  const q = quad.map((p) => ({ x: (p.x / Math.max(1, source.width)) * W, y: (p.y / Math.max(1, source.height)) * H }));
+  const out = q.map((p) => ({ ...p }));
+  /*
+   * Keep the search tiny. A wide window lets a corner jump onto any other
+   * strong line nearby — grout between tiles, the edge of a desk, a shadow —
+   * which silently replaced a correct page quad with the wrong rectangle
+   * during testing. 1.5 small-grid px is ~6 source px, enough to pull a corner
+   * off the mask boundary and onto the printed edge, but not enough to reach a
+   * different feature.
+   */
+  const R = 1.5; // small-grid pixels
+  const STEP = 0.5;
+
+  for (let i = 0; i < 4; i++) {
+    const prev = q[(i + 3) % 4];
+    const cur = q[i];
+    const next = q[(i + 1) % 4];
+    let bestScore = -1;
+    let bx = cur.x;
+    let by = cur.y;
+    for (let dy = -R; dy <= R; dy += STEP) {
+      for (let dx = -R; dx <= R; dx += STEP) {
+        const cand = { x: cur.x + dx, y: cur.y + dy };
+        const sc = edgeScore(prev, cand) + edgeScore(cand, next);
+        if (sc > bestScore) {
+          bestScore = sc;
+          bx = cand.x;
+          by = cand.y;
+        }
+      }
+    }
+    out[i] = { x: bx, y: by };
+  }
+
+  return out.map((p) => ({
+    x: Math.min(source.width, Math.max(0, (p.x / W) * source.width)),
+    y: Math.min(source.height, Math.max(0, (p.y / H) * source.height)),
+  })) as [Point, Point, Point, Point];
+}
+
+/**
+ * Corners of the minimum-area rectangle around a pixel blob, mapped to source
+ * pixels. Deriving the quad from a fitted rectangle (instead of from four
+ * extreme pixels) is what stops single noisy specks from dragging a corner out
+ * into the middle of the floor.
+ */
+function quadFromComponent(
+  pixels: number[],
+  W: number,
+  H: number,
+  source: HTMLCanvasElement
+): [Point, Point, Point, Point] | null {
+  if (pixels.length < 12) return null;
+
+  // convex hull (monotone chain) of the blob
+  const pts: { x: number; y: number }[] = [];
+  const stride = Math.max(1, Math.floor(pixels.length / 4000));
+  for (let i = 0; i < pixels.length; i += stride) {
+    const p = pixels[i];
+    const x = p % W;
+    pts.push({ x, y: (p - x) / W });
+  }
+  if (pts.length < 4) return null;
+  pts.sort((a, b) => (a.x === b.x ? a.y - b.y : a.x - b.x));
+  const cross = (o: { x: number; y: number }, a: { x: number; y: number }, b: { x: number; y: number }) =>
+    (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+  const lower: { x: number; y: number }[] = [];
+  for (const pt of pts) {
+    while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], pt) <= 0) lower.pop();
+    lower.push(pt);
+  }
+  const upper: { x: number; y: number }[] = [];
+  for (let i = pts.length - 1; i >= 0; i--) {
+    const pt = pts[i];
+    while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], pt) <= 0) upper.pop();
+    upper.push(pt);
+  }
+  const hull = lower.slice(0, -1).concat(upper.slice(0, -1));
+  if (hull.length < 3) return null;
+
+  // minimum-area rotated rectangle over the hull (rotating calipers, O(n·hull))
+  let bestArea = Infinity;
+  let bestAngle = 0;
+  for (let i = 0; i < hull.length; i++) {
+    const a = hull[i];
+    const b = hull[(i + 1) % hull.length];
+    const ang = Math.atan2(b.y - a.y, b.x - a.x);
+    const cos = Math.cos(-ang);
+    const sin = Math.sin(-ang);
+    let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+    for (const p of hull) {
+      const u = p.x * cos - p.y * sin;
+      const v = p.x * sin + p.y * cos;
+      if (u < minU) minU = u;
+      if (u > maxU) maxU = u;
+      if (v < minV) minV = v;
+      if (v > maxV) maxV = v;
+    }
+    const area = (maxU - minU) * (maxV - minV);
+    if (area < bestArea) {
+      bestArea = area;
+      bestAngle = ang;
+    }
+  }
+
+  const cos = Math.cos(-bestAngle);
+  const sin = Math.sin(-bestAngle);
+  let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
+  for (const p of hull) {
+    const u = p.x * cos - p.y * sin;
+    const v = p.x * sin + p.y * cos;
+    if (u < minU) minU = u;
+    if (u > maxU) maxU = u;
+    if (v < minV) minV = v;
+    if (v > maxV) maxV = v;
+  }
+  const unrotate = (u: number, v: number) => {
+    const a = Math.cos(bestAngle);
+    const b = Math.sin(bestAngle);
+    return { x: u * a - v * b, y: u * b + v * a };
+  };
+  const c = [
+    unrotate(minU, minV),
+    unrotate(maxU, minV),
+    unrotate(maxU, maxV),
+    unrotate(minU, maxV),
+  ];
+
+  // order as TL, TR, BR, BL so the rest of the pipeline (and the handles) agree
+  const cx = c.reduce((s, p) => s + p.x, 0) / 4;
+  const cy = c.reduce((s, p) => s + p.y, 0) / 4;
+  const ordered = c
+    .map((p) => ({ ...p, a: Math.atan2(p.y - cy, p.x - cx) }))
+    .sort((p, q) => p.a - q.a)
+    .map(({ x, y }) => ({ x, y }));
+  // atan2 order starting from -135° gives TL, TR, BR, BL
+  const start = ordered.reduce((bi, p, i, arr) => (p.x + p.y < arr[bi].x + arr[bi].y ? i : bi), 0);
+  const rot = [...ordered.slice(start), ...ordered.slice(0, start)];
+  const mapped: [Point, Point, Point, Point] = [
+    mapSmall(rot[0], W, H, source),
+    mapSmall(rot[1], W, H, source),
+    mapSmall(rot[2], W, H, source),
+    mapSmall(rot[3], W, H, source),
+  ];
+  // make sure the first point really is the top-left
+  if (mapped[0].x + mapped[0].y > mapped[2].x + mapped[2].y) {
+    mapped.reverse();
+  }
+  return mapped;
+}
+
+function mapSmall(p: { x: number; y: number }, W: number, H: number, source: HTMLCanvasElement): Point {
+  return {
+    x: Math.min(source.width, Math.max(0, (p.x / W) * source.width)),
+    y: Math.min(source.height, Math.max(0, (p.y / H) * source.height)),
+  };
+}
+
+/**
+ * Mean gradient magnitude sampled along the four edges of a quad.
+ *
+ * A genuine sheet edge crosses paper→background, so the gradient is strong and
+ * consistent. A quad that wanders through a carpet texture or across a wall
+ * has weak, patchy edges. This is the signal that lets the caller decide
+ * whether auto-crop should be trusted.
+ *
+ * `lum` is the small greyscale image (W×H); the quad is in source pixels, so
+ * each sample is scaled into that grid.
+ */
+function edgeContrast(
+  q: [Point, Point, Point, Point],
+  lum: Float32Array,
+  W: number,
+  H: number,
+  sourceW: number,
+  sourceH: number
+): { mean: number; consistency: number } {
+  const at = (x: number, y: number): number => {
+    const xi = Math.min(W - 1, Math.max(0, Math.round(x)));
+    const yi = Math.min(H - 1, Math.max(0, Math.round(y)));
+    return lum[yi * W + xi];
+  };
+  let total = 0;
+  let strong = 0;
+  let n = 0;
+  const steps = 28;
+  for (let i = 0; i < 4; i++) {
+    const a = q[i];
+    const b = q[(i + 1) % 4];
+    // outward normal of this edge (in small-grid units)
+    const ax = (a.x / Math.max(1, sourceW)) * W;
+    const ay = (a.y / Math.max(1, sourceH)) * H;
+    const bx = (b.x / Math.max(1, sourceW)) * W;
+    const by = (b.y / Math.max(1, sourceH)) * H;
+    const len = Math.hypot(bx - ax, by - ay) || 1;
+    let nx = -(by - ay) / len;
+    let ny = (bx - ax) / len;
+    const mid = { x: (ax + bx) / 2, y: (ay + by) / 2 };
+    // point the normal away from the quad's centre
+    const cx = q.reduce((s, p) => s + (p.x / Math.max(1, sourceW)) * W, 0) / 4;
+    const cy = q.reduce((s, p) => s + (p.y / Math.max(1, sourceH)) * H, 0) / 4;
+    if (nx * (mid.x - cx) + ny * (mid.y - cy) < 0) {
+      nx = -nx;
+      ny = -ny;
+    }
+    for (let s2 = 1; s2 < steps; s2++) {
+      const t = s2 / steps;
+      const px = ax + (bx - ax) * t;
+      const py = ay + (by - ay) * t;
+      const inside = at(px - nx * 2, py - ny * 2);
+      const outside = at(px + nx * 2, py + ny * 2);
+      const step = Math.abs(outside - inside);
+      total += step;
+      if (step > 12) strong++;
+      n++;
+    }
+  }
+  return { mean: n ? total / n : 0, consistency: n ? strong / n : 0 };
+}
+
 
 export function detectDocumentCorners(source: HTMLCanvasElement): [Point, Point, Point, Point] {
   return detectDocumentCornersDetailed(source).corners;
@@ -418,6 +839,45 @@ export interface WarpResult {
 }
 
 /** Destination size for a quad: long edge capped, never upscaled past source. */
+/**
+ * How plausible a long/short side ratio is for a scanned sheet.
+ *
+ * A Gaussian in log space centred on the most common shapes (a 4x3 photo of a
+ * page and an A4 sheet both land near 1.3-1.4, an ID card near 1.6, a receipt
+ * further out). A hard window with a cliff edge — the previous approach — was
+ * actively harmful: it scored a 4:1 band of floor *higher* than the 2.6:1
+ * boundary of the card that was actually in the photo.
+ */
+function aspectPrior(aspect: number): number {
+  const target = aspect < 1 ? 1 / Math.max(0.2, aspect) : aspect;
+  const l = Math.log(Math.max(1, target) / 1.38);
+  return Math.exp(-(l * l) / (2 * 0.34 * 0.34));
+}
+
+/** Aspect ratios a scanned sheet is allowed to snap to. */
+const SHEET_ASPECTS = [
+  1 / 1.414, // A4 portrait
+  1 / 1.294, // US Letter portrait
+  1 / 1.333, // 4x3 card / photo
+  1 / 1.6, // ID-1 (credit card, driver's licence, national ID)
+  1 / 1.5, // 3x2 photo
+  1 / 2.0, // long receipt
+];
+
+/**
+ * Output size for a warp.
+ *
+ * A quad in a photo is a *perspective* view of a rectangle, so its top edge is
+ * shorter in pixels than the real page whenever the top of the sheet is
+ * further away. Sizing the output by those raw pixel lengths (what this used to
+ * do) squashed the page unevenly, which is what made scans look distorted on
+ * one axis and "messy".
+ *
+ * The width is taken from the widest edge (least foreshortened) and the height
+ * is then derived from a plausible sheet aspect ratio rather than from the
+ * measured height, so the warped page has the shape of real paper instead of
+ * whatever the perspective happened to produce.
+ */
 export function warpSize(
   quad: [Point, Point, Point, Point],
   maxSide = 2400
@@ -427,8 +887,32 @@ export function warpSize(
   const wBottom = Math.hypot(br.x - bl.x, br.y - bl.y);
   const hLeft = Math.hypot(bl.x - tl.x, bl.y - tl.y);
   const hRight = Math.hypot(br.x - tr.x, br.y - tr.y);
-  const outW = Math.max(wTop, wBottom);
-  const outH = Math.max(hLeft, hRight);
+
+  const widthPx = Math.max(wTop, wBottom);
+  const heightPx = Math.max(hLeft, hRight);
+
+  // measured shape of this quad
+  const measured = Math.min(widthPx, heightPx) / Math.max(1, Math.max(widthPx, heightPx));
+  let ratio = measured;
+  let bestDelta = 0.12; // only snap when we are genuinely close
+  for (const target of SHEET_ASPECTS) {
+    const delta = Math.abs(measured - target);
+    if (delta < bestDelta) {
+      bestDelta = delta;
+      ratio = target;
+    }
+  }
+
+  let outW: number;
+  let outH: number;
+  if (widthPx >= heightPx) {
+    outW = widthPx;
+    outH = Math.round(widthPx * ratio);
+  } else {
+    outH = heightPx;
+    outW = Math.round(heightPx * ratio);
+  }
+
   const shrink = Math.min(1, maxSide / Math.max(outW, outH, 1));
   return {
     width: Math.max(16, Math.round(outW * shrink)),
@@ -500,6 +984,8 @@ export async function warpPerspectiveAsync(
     for (let y = y0; y < y0 + bandH; y++) {
       const row = y - y0;
       for (let x = 0; x < outW; x++) {
+        const acc = [0, 0, 0];
+        let taps = 0;
         const den = h[6] * x + h[7] * y + 1;
         const u = (h[0] * x + h[1] * y + h[2]) / den;
         const v = (h[3] * x + h[4] * y + h[5]) / den;
@@ -511,19 +997,47 @@ export async function warpPerspectiveAsync(
           o[oi + 3] = 255;
           continue;
         }
-        const xa = u | 0;
-        const ya = v | 0;
-        const fx = u - xa;
-        const fy = v - ya;
-        const i00 = (ya * SW + xa) * 4;
-        const i10 = i00 + 4;
-        const i01 = ((ya + 1) * SW + xa) * 4;
-        const i11 = i01 + 4;
-        for (let ch = 0; ch < 3; ch++) {
-          const a = sdat[i00 + ch] * (1 - fx) + sdat[i10 + ch] * fx;
-          const b = sdat[i01 + ch] * (1 - fx) + sdat[i11 + ch] * fx;
-          o[oi + ch] = a * (1 - fy) + b * fy;
+        /*
+         * Supersample 2x2 and box-filter.
+         *
+         * A single bilinear tap aliases badly when the source is scaled down
+         * (a phone capture is ~2600px wide, the page is ~2400): the high
+         * frequency paper texture and text edges fold into the horizontal
+         * banding that made scans look "messy" and striped. Four taps averaged
+         * is only ~1.6x the cost and removes most of it.
+         */
+        for (let ch = 0; ch < 3; ch++) acc[ch] = 0;
+        for (let sy = 0; sy < 2; sy++) {
+          for (let sx = 0; sx < 2; sx++) {
+            const uu = u + sx * 0.5;
+            const vv = v + sy * 0.5;
+            const xa = uu | 0;
+            const ya = vv | 0;
+            if (xa < 0 || ya < 0 || xa >= SW - 1 || ya >= SH - 1) continue;
+            const fx = uu - xa;
+            const fy = vv - ya;
+            const i00 = (ya * SW + xa) * 4;
+            const i10 = i00 + 4;
+            const i01 = ((ya + 1) * SW + xa) * 4;
+            const i11 = i01 + 4;
+            for (let ch = 0; ch < 3; ch++) {
+              const a = sdat[i00 + ch] * (1 - fx) + sdat[i10 + ch] * fx;
+              const b = sdat[i01 + ch] * (1 - fx) + sdat[i11 + ch] * fx;
+              acc[ch] += a * (1 - fy) + b * fy;
+            }
+            taps++;
+          }
         }
+        if (!taps) {
+          o[oi] = 255;
+          o[oi + 1] = 255;
+          o[oi + 2] = 255;
+          o[oi + 3] = 255;
+          continue;
+        }
+        o[oi] = acc[0] / taps;
+        o[oi + 1] = acc[1] / taps;
+        o[oi + 2] = acc[2] / taps;
         o[oi + 3] = 255;
       }
     }
@@ -537,6 +1051,13 @@ export async function warpPerspectiveAsync(
 }
 
 /** Synchronous wrapper (kept for callers that do not need progress). */
+/**
+ * Synchronous warp, kept for callers that cannot await.
+ *
+ * Delegates to the same supersampled sampler as the async version so both
+ * produce identical pixels (the old copy here had its own single-tap bilinear
+ * loop, which produced visibly striped output whenever the page was scaled).
+ */
 export function warpPerspective(
   source: HTMLCanvasElement,
   quad: [Point, Point, Point, Point],
@@ -562,23 +1083,36 @@ export function warpPerspective(
       const u = (h[0] * x + h[1] * y + h[2]) / den;
       const v = (h[3] * x + h[4] * y + h[5]) / den;
       const oi = (y * outW + x) * 4;
-      if (u < 0 || v < 0 || u >= SW - 1 || v >= SH - 1) {
+      let r = 0;
+      let g = 0;
+      let b = 0;
+      let taps = 0;
+      for (let sy = 0; sy < 2; sy++) {
+        for (let sx = 0; sx < 2; sx++) {
+          const uu = u + sx * 0.5;
+          const vv = v + sy * 0.5;
+          const xa = uu | 0;
+          const ya = vv | 0;
+          if (xa < 0 || ya < 0 || xa >= SW - 1 || ya >= SH - 1) continue;
+          const fx = uu - xa;
+          const fy = vv - ya;
+          const i00 = (ya * SW + xa) * 4;
+          const i10 = i00 + 4;
+          const i01 = ((ya + 1) * SW + xa) * 4;
+          const i11 = i01 + 4;
+          r += (sdat[i00] * (1 - fx) + sdat[i10] * fx) * (1 - fy) + (sdat[i01] * (1 - fx) + sdat[i11] * fx) * fy;
+          g += (sdat[i00 + 1] * (1 - fx) + sdat[i10 + 1] * fx) * (1 - fy) + (sdat[i01 + 1] * (1 - fx) + sdat[i11 + 1] * fx) * fy;
+          b += (sdat[i00 + 2] * (1 - fx) + sdat[i10 + 2] * fx) * (1 - fy) + (sdat[i01 + 2] * (1 - fx) + sdat[i11 + 2] * fx) * fy;
+          taps++;
+        }
+      }
+      if (!taps) {
         o[oi] = o[oi + 1] = o[oi + 2] = o[oi + 3] = 255;
         continue;
       }
-      const xa = u | 0;
-      const ya = v | 0;
-      const fx = u - xa;
-      const fy = v - ya;
-      const i00 = (ya * SW + xa) * 4;
-      const i10 = i00 + 4;
-      const i01 = ((ya + 1) * SW + xa) * 4;
-      const i11 = i01 + 4;
-      for (let ch = 0; ch < 3; ch++) {
-        const a = sdat[i00 + ch] * (1 - fx) + sdat[i10 + ch] * fx;
-        const b = sdat[i01 + ch] * (1 - fx) + sdat[i11 + ch] * fx;
-        o[oi + ch] = a * (1 - fy) + b * fy;
-      }
+      o[oi] = r / taps;
+      o[oi + 1] = g / taps;
+      o[oi + 2] = b / taps;
       o[oi + 3] = 255;
     }
   }
@@ -717,31 +1251,52 @@ export function applyScanFilter(canvas: HTMLCanvasElement, filter: ScanFilter): 
       d[i] = d[i + 1] = d[i + 2] = v;
     }
   } else if (filter === "vivid") {
-    // gentle white-balance + contrast + saturation
-    let min = 255;
-    let max = 0;
-    for (let i = 0; i < d.length; i += 4) {
-      const l = 0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2];
-      if (l < min) min = l;
-      if (l > max) max = l;
+    /*
+     * Contrast enhancement with a brightness guard.
+     *
+     * Most photos are dark ink on a light page, and stretching the luminance
+     * across the full range makes those crisp. A dark original — black business
+     * card, chalkboard, night-mode screen — occupies a narrow dark band, and the
+     * same stretch drove its background to pure black with blown-out white
+     * text, which read as an inversion and looked broken. So measure the median
+     * first: light originals get the full stretch, dark ones are levelled inside
+     * their own range and lifted off pure black instead.
+     */
+    const samples: number[] = [];
+    const step = Math.max(1, Math.floor(n / 5000));
+    for (let p = 0; p < n; p += step) {
+      const i = p * 4;
+      samples.push(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
     }
-    const lo = min + (max - min) * 0.06;
-    const hi = max - (max - min) * 0.06;
-    const span = Math.max(1, hi - lo);
+    samples.sort((a, b) => a - b);
+    const pick = (q: number) =>
+      samples[Math.min(samples.length - 1, Math.max(0, Math.round(q * (samples.length - 1))))];
+    const median = pick(0.5);
+    const darkOriginal = median < 110;
+    const lo = pick(0.02);
+    const hi = pick(0.98);
+    const inset = (hi - lo) * 0.05;
+    const span = Math.max(40, darkOriginal ? hi - lo : hi - lo - inset * 2);
+    const outLo = darkOriginal ? 38 : 0;
+    const outSpan = darkOriginal ? 200 : 255;
+    const sat = darkOriginal ? 1.15 : 1.03;
+
     for (let i = 0; i < d.length; i += 4) {
-      let r = d[i];
-      let g = d[i + 1];
-      let b = d[i + 2];
-      const l = 0.299 * r + 0.587 * g + 0.114 * b;
-      // contrast stretch on luminance, keep colour ratios
-      const target = Math.min(255, Math.max(0, ((l - lo) / span) * 255));
-      const gain = l > 1 ? target / l : 1;
-      r = Math.min(255, r * gain * 1.04);
-      g = Math.min(255, g * gain * 1.03);
-      b = Math.min(255, b * gain);
-      d[i] = r;
-      d[i + 1] = g;
-      d[i + 2] = b;
+      const r0 = d[i];
+      const g0 = d[i + 1];
+      const b0 = d[i + 2];
+      const l = 0.299 * r0 + 0.587 * g0 + 0.114 * b0;
+      const from = darkOriginal ? lo : lo + inset;
+      const t = Math.min(1, Math.max(0, (l - from) / span));
+      const grey = outLo + t * outSpan;
+      const gain = l > 1 ? grey / l : 1;
+      // colour ratio preserved, then a small saturation nudge around the new grey
+      const rr = r0 * gain;
+      const gg = g0 * gain;
+      const bb = b0 * gain;
+      d[i] = Math.min(255, Math.max(0, grey + (rr - grey) * sat));
+      d[i + 1] = Math.min(255, Math.max(0, grey + (gg - grey) * sat));
+      d[i + 2] = Math.min(255, Math.max(0, grey + (bb - grey) * sat));
     }
   }
   ctx.putImageData(img, 0, 0);

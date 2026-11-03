@@ -280,6 +280,7 @@ export default function ScannerModal() {
       bare
       fullScreenMobile
       clipBody
+      tallBody
       footer={
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-1.5 text-[11.5px] text-muted">
@@ -483,7 +484,9 @@ export default function ScannerModal() {
                   src={reviewPreview}
                   alt="Scanned page"
                   className="block h-auto w-auto max-w-full object-contain"
-                  style={{ maxHeight: "min(50dvh, 500px)" }}
+                  /* Fill the taller viewfinder the crop stage now uses, so the
+                     desktop review is not a small card floating in empty space. */
+                  style={{ maxHeight: "min(62dvh, 640px)" }}
                   draggable={false}
                 />
               </div>

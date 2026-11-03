@@ -79,6 +79,7 @@ export function Modal({
   bare,
   fullScreenMobile,
   clipBody,
+  tallBody,
 }: {
   open: boolean;
   onClose: () => void;
@@ -92,6 +93,15 @@ export function Modal({
   fullScreenMobile?: boolean;
   /** The body manages its own layout: no scrolling, it takes the full height. */
   clipBody?: boolean;
+  /**
+   * Give the body a definite height.
+   *
+   * The dialog is `h-auto` above the phone breakpoint, so a child using
+   * `flex-1` has nothing to resolve against and collapsed to 2x2 pixels —
+   * the crop viewfinder disappeared on desktop while looking fine on mobile
+   * (where the sheet is full-height). This pins the body to the viewport.
+   */
+  tallBody?: boolean;
 }) {
   useEffect(() => {
     if (!open) return;
@@ -118,9 +128,18 @@ export function Modal({
       <div
         className={clsx(
           "animate-pop relative z-10 flex w-full min-w-0 flex-col overflow-hidden border border-line2 bg-panel shadow-2xl",
-          fullScreenMobile
-            ? "h-[100dvh] max-h-[100dvh] rounded-none border-0 sm:h-auto sm:max-h-[94dvh] sm:rounded-2xl sm:border"
-            : "max-h-[94dvh] rounded-t-2xl sm:rounded-2xl",
+          /*
+           * `sm:h-auto` and a `sm:h-[...]` utility cancel each other out
+           * (identical specificity, so stylesheet order wins), which is why
+           * asking for a tall body still produced a 247px-tall dialog. Pick one
+           * height rule for the desktop breakpoint instead of layering them.
+           */
+          fullScreenMobile &&
+            (tallBody
+              ? "h-[100dvh] max-h-[100dvh] rounded-none border-0 sm:h-[min(92dvh,900px)] sm:max-h-[94dvh] sm:rounded-2xl sm:border"
+              : "h-[100dvh] max-h-[100dvh] rounded-none border-0 sm:h-auto sm:max-h-[94dvh] sm:rounded-2xl sm:border"),
+          !fullScreenMobile && "max-h-[94dvh] rounded-t-2xl sm:rounded-2xl",
+          !fullScreenMobile && tallBody && "h-[100dvh] sm:h-[min(92dvh,900px)]",
           width
         )}
       >
@@ -137,6 +156,7 @@ export function Modal({
           className={clsx(
             "min-h-0 min-w-0 flex-1",
             clipBody ? "flex flex-col overflow-hidden" : "scroll-thin overflow-y-auto overflow-x-hidden",
+            tallBody && "flex flex-col overflow-hidden",
             bare ? "" : "p-5"
           )}
         >
