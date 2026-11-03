@@ -504,6 +504,22 @@ export function detectDocumentCornersDetailed(source: HTMLCanvasElement): QuadDe
    * boundary?" It gates whether auto-crop is trusted at all, so a quad that
    * swallowed the floor scores low and the caller falls back to the full frame.
    */
+  /*
+   * Pull the quad in by a hair.
+   *
+   * The mask boundary sits a pixel or two outside the printed edge (and the
+   * mask is computed at 320 px, so a source pixel is worth three), which shows
+   * up as a thin ribbon of desk along the scan. A ~0.6% inset is invisible on
+   * the page but reliably swallows that ribbon; it stays inside the coordinate
+   * space, so the corner handles keep their meaning.
+   */
+  const insetQuad = (q: [Point, Point, Point, Point], f: number): [Point, Point, Point, Point] => {
+    const cx = (q[0].x + q[1].x + q[2].x + q[3].x) / 4;
+    const cy = (q[0].y + q[1].y + q[2].y + q[3].y) / 4;
+    return q.map((p) => ({ x: p.x + (cx - p.x) * f, y: p.y + (cy - p.y) * f })) as [Point, Point, Point, Point];
+  };
+  const finalQuad = insetQuad(quad, 0.006);
+
   const confidence = Math.max(
     0,
     Math.min(
@@ -518,7 +534,7 @@ export function detectDocumentCornersDetailed(source: HTMLCanvasElement): QuadDe
 
   const plausible = confidence >= 0.5;
   return {
-    corners: plausible ? quad : FULL_FRAME(source.width, source.height),
+    corners: plausible ? finalQuad : FULL_FRAME(source.width, source.height),
     confidence: plausible ? confidence : Math.min(confidence, 0.49),
     found: plausible,
   };
@@ -583,7 +599,16 @@ function refineQuadToEdges(
     for (let dy = -R; dy <= R; dy += STEP) {
       for (let dx = -R; dx <= R; dx += STEP) {
         const cand = { x: cur.x + dx, y: cur.y + dy };
-        const sc = edgeScore(prev, cand) + edgeScore(cand, next);
+        /*
+         * The movement penalty matters more than it looks. Without it a corner
+         * happily slid ~18 px *along* an edge — the gradient it found there was
+         * just as strong (a shadow line running parallel to the page) — which
+         * pushed that corner out over the background. The mask rectangle is
+         * already within a few pixels, so only accept a move that clearly
+         * improves the edge.
+         */
+        const moved = Math.hypot(dx, dy);
+        const sc = edgeScore(prev, cand) + edgeScore(cand, next) - moved * 1.8;
         if (sc > bestScore) {
           bestScore = sc;
           bx = cand.x;
