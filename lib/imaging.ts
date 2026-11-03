@@ -916,10 +916,28 @@ export function warpSize(
   const widthPx = Math.max(wTop, wBottom);
   const heightPx = Math.max(hLeft, hRight);
 
-  // measured shape of this quad
+  /*
+   * Measured shape of this quad, and how much perspective is explained by the
+   * quad itself rather than by the page being an unusual shape.
+   *
+   * Snapping used to look only at the measured ratio, which silently rewrote a
+   * sideways A4 sheet (measured ~0.75) into 4:3. That lost ~6% of the page's
+   * height and left a page that was both the wrong shape and the wrong way up —
+   * the "landscape page is compromised" report. A skewed quad (strongly
+   * converging edges) still needs snapping, because foreshortening changes the
+   * ratio; a quad that is already a clean rectangle does not, so its ratio is
+   * the truth about the page.
+   */
   const measured = Math.min(widthPx, heightPx) / Math.max(1, Math.max(widthPx, heightPx));
+  const skew =
+    Math.abs(wTop - wBottom) / Math.max(1, Math.max(wTop, wBottom)) +
+    Math.abs(hLeft - hRight) / Math.max(1, Math.max(hLeft, hRight));
+
   let ratio = measured;
-  let bestDelta = 0.12; // only snap when we are genuinely close
+  // Snap only when the page is close to a known shape AND the shape is not
+  // already trustworthy on its own.
+  const snapWindow = skew > 0.12 ? 0.12 : 0.035;
+  let bestDelta = snapWindow;
   for (const target of SHEET_ASPECTS) {
     const delta = Math.abs(measured - target);
     if (delta < bestDelta) {

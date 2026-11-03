@@ -66,16 +66,30 @@ export default function Viewport({ onEditWord }: { onEditWord: (word: OcrWord, p
     if (!el) return;
     const bump = () => setLayoutTick((t) => t + 1);
     bump();
+    /*
+     * The tool rail and the action bar mount in the same commit as this
+     * component, so their refs (and therefore their measured height) only
+     * exist after layout. Re-measure on the next frame as well, otherwise the
+     * page keeps the size it was given before the rail was accounted for.
+     */
+    const raf = requestAnimationFrame(bump);
     const ro = new ResizeObserver(bump);
     ro.observe(el);
     if (pad) ro.observe(pad); // the tool rail's reserved height lives in this padding
     const onOrient = () => bump();
     window.addEventListener("orientationchange", onOrient);
     window.addEventListener("resize", onOrient);
+    // the on-screen keyboard / collapsing URL bar change this without a resize
+    const vv = window.visualViewport;
+    vv?.addEventListener("resize", onOrient);
+    vv?.addEventListener("scroll", onOrient);
     return () => {
+      cancelAnimationFrame(raf);
       ro.disconnect();
       window.removeEventListener("orientationchange", onOrient);
       window.removeEventListener("resize", onOrient);
+      vv?.removeEventListener("resize", onOrient);
+      vv?.removeEventListener("scroll", onOrient);
     };
   }, []);
 
@@ -94,20 +108,57 @@ export default function Viewport({ onEditWord }: { onEditWord: (word: OcrWord, p
    * (`layoutTick`), so the padding that reserves room for the floating tool
    * rail is always the current one.
    */
-  const { widthPx, heightPx } = useMemo(() => {
+  const { widthPx, heightPx, measured } = useMemo(() => {
     const el = scrollRef.current;
     const pad = padRef.current;
     const px = (v: string) => parseFloat(v) || 0;
     const cs = pad ? getComputedStyle(pad) : null;
     const cw = el ? el.clientWidth - (cs ? px(cs.paddingLeft) + px(cs.paddingRight) : 0) : 900;
     const ch = el ? el.clientHeight - (cs ? px(cs.paddingTop) + px(cs.paddingBottom) : 0) : 600;
+
+    /*
+     * The first render happens before the pane has been laid out, and that
+     * first layout is what gets committed to the store and to the canvas: the
+     * old fallback of 900x600 drew the page 600px tall into a 269px space, and
+     * once measured it stayed far too big — the "landscape page is broken and
+     * does not fit the pane" report. Flag the guess so nothing downstream
+     * treats it as real; the page is rendered once the pane can be measured.
+     */
+    const isMeasured = !!el && el.clientHeight > 0 && el.clientWidth > 0;
+
+    /*
+     * Measure the pane that is actually *visible*, not just the element box.
+     *
+     * The tool rail floats over the bottom of the scroll area instead of taking
+     * part in the flex row, so the element's height includes space the user can
+     * never see. Reserving bottom padding for it (which `--rail-h` does when
+     * `pb-[calc(var(--rail-h)+1rem)]` applies) only helps once the content is
+     * taller than the pane and actually scrolls; a fit-to-screen page never
+     * scrolls, so it was laid out into the region hidden behind the rail. That
+     * is why a page could come out clipped at the bottom even though the maths
+     * said it fitted.
+     *
+     * `--rail-top` (published by ToolRail) is the distance from the top of the
+     * pane to the top of the rail, so it gives the real usable height directly.
+     */
+    const railEl = document.querySelector<HTMLElement>("[data-rail]");
+    const railTop = railEl && el ? Math.max(0, railEl.getBoundingClientRect().top - el.getBoundingClientRect().top) : 0;
+    const padTop = cs ? px(cs.paddingTop) : 0;
+    const visibleH = railTop > 0 ? Math.max(120, railTop - padTop) : ch;
+
+    // On phones the bottom action bar is the real limit, and it is not part of
+    // the scrolling element at all. Trim to the visual viewport too, so the URL
+    // bar / home indicator collapsing mid-scroll cannot hide the page.
+    const vv = typeof window !== "undefined" ? window.visualViewport : null;
+    const viewportTrim = !vv || !el ? 0 : Math.max(0, vv.height - el.getBoundingClientRect().bottom + 4);
+    const availH = Math.max(120, visibleH - viewportTrim);
     const availW = Math.max(120, cw);
-    const availH = Math.max(120, ch);
     const fitScale = Math.min(availW / ptSize.w, availH / ptSize.h);
     const scale = fit ? fitScale : fitScale * zoom;
     return {
       widthPx: Math.max(80, Math.round(ptSize.w * scale)),
       heightPx: Math.max(80, Math.round(ptSize.h * scale)),
+      measured: isMeasured,
     };
     // layoutTick re-reads the DOM after resizes / orientation changes
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -537,15 +588,23 @@ export default function Viewport({ onEditWord }: { onEditWord: (word: OcrWord, p
       >
         <div
           ref={padRef}
-          className="flex min-h-full items-center justify-center p-4 pb-[calc(var(--rail-h,88px)+1rem)] lg:items-start lg:p-6 lg:pb-[calc(var(--rail-h,88px)+1.5rem)]"
+          className="flex min-h-full items-center justify-center p-4 pb-[max(1rem,calc(var(--rail-h,88px)+env(safe-area-inset-bottom)+1rem))] lg:items-start lg:p-6 lg:pb-[calc(var(--rail-h,88px)+1.5rem)]"
           onClick={() => tool === "select" && store.setSelectedId(null)}
         >
           <div
             ref={stageRef}
             className="paper-shadow relative select-none"
             style={{
-              width: widthPx,
-              height: heightPx,
+              /*
+               * Render nothing until the pane has been measured. `widthPx` and
+               * `heightPx` fall back to a 900x600 guess on the very first pass
+               * (refs are null until after layout), and painting at that size
+               * is what left pages too big for the pane — worst of all for a
+               * landscape page, where the guess is 6x the height available.
+               */
+              width: measured ? widthPx : 0,
+              height: measured ? heightPx : 0,
+              visibility: measured ? "visible" : "hidden",
               touchAction: "none",
               cursor: tool === "select" ? "default" : tool === "text" ? "text" : "crosshair",
             }}

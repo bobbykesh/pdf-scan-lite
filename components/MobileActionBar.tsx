@@ -1,6 +1,6 @@
 "use client";
 
-import { Camera, Download, FolderOpen, Menu } from "lucide-react";
+import { Camera, Download, FolderOpen, Menu, RotateCw } from "lucide-react";
 import { useStore } from "@/lib/store";
 import { useShell } from "./AppShell";
 
@@ -63,6 +63,19 @@ export default function MobileActionBar({ onOpenPages }: { onOpenPages: () => vo
           }}
         />
       </label>
+
+      {/* Page rotation lives in the desktop toolbar only; on a phone that left
+          no way at all to straighten a page that was scanned on its side. */}
+      <button
+        type="button"
+        onClick={() => store.currentPage && store.rotatePage(store.currentPage.id, 1)}
+        disabled={!hasPages}
+        className={`${item} border border-line2 bg-panel2 text-ink`}
+        aria-label="Rotate page right"
+      >
+        <RotateCw size={19} />
+        Rotate
+      </button>
 
       <button
         type="button"

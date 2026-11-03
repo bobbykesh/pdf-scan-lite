@@ -39,13 +39,26 @@ export default function ToolRail() {
    * exactly that much space. Without it the floating rail sits ON TOP of the
    * bottom of the page — very noticeable on short screens and on landscape
    * pages, where the document ends right where the rail begins.
+   *
+   * It also publishes `--rail-top`, the distance from the top of the scrolling
+   * pane to the top of the rail. The viewport needs that one too: reserving
+   * bottom padding only helps once the content actually scrolls, but a
+   * fit-to-screen page never scrolls, so it just sat underneath the rail. The
+   * fit has to be computed against the space above the rail instead.
    */
   useEffect(() => {
     const el = railRef.current;
     if (!el) return;
     const apply = () => {
-      const h = Math.ceil(el.getBoundingClientRect().height);
+      const rect = el.getBoundingClientRect();
+      const h = Math.ceil(rect.height);
       document.documentElement.style.setProperty("--rail-h", `${h}px`);
+      // The rail is a sibling of the scrolling pane, not a child of it.
+      const pane = document.querySelector(".scroll-thin");
+      if (pane) {
+        const top = Math.max(0, Math.round(rect.top - pane.getBoundingClientRect().top));
+        document.documentElement.style.setProperty("--rail-top", `${top}px`);
+      }
     };
     apply();
     const ro = new ResizeObserver(apply);
@@ -53,12 +66,14 @@ export default function ToolRail() {
     return () => {
       ro.disconnect();
       document.documentElement.style.removeProperty("--rail-h");
+      document.documentElement.style.removeProperty("--rail-top");
     };
   }, []);
 
   return (
     <div
       ref={railRef}
+      data-rail
       className="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col items-center gap-2 pb-3"
     >
       {/* contextual options */}

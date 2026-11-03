@@ -157,10 +157,13 @@ export default function ScannerModal() {
   );
   const reviewPreview = useMemo(() => {
     if (!cropped) return "";
-    // Rotate the bitmap itself so the layout box matches what you see — CSS
-    // rotation keeps the original box and clips the page.
-    return filteredPreviewUrl(rotateCanvas(cropped, rotation), filter, 1000, 0.88);
-  }, [cropped, filter, rotation]);
+    /*
+     * `cropped` is already the right way up: the rotation is applied to the
+     * bitmap when it is set (auto-orientation after cropping, and the rotate
+     * buttons), so the preview and the saved page can never disagree.
+     */
+    return filteredPreviewUrl(cropped, filter, 1000, 0.88);
+  }, [cropped, filter]);
 
   /* ---------------------------------------------------------------- actions */
 
@@ -214,6 +217,7 @@ export default function ScannerModal() {
       result = raw;
     }
     setCropped(result);
+    setRotation(0);
     setMode("review");
     setBusy(null);
   };
@@ -225,15 +229,19 @@ export default function ScannerModal() {
       // full-resolution render of the chosen look — derived from the pristine crop
       const finalCanvas = applyScanFilterToCopy(cropped, filter);
       const dataUrl = finalCanvas.toDataURL("image/jpeg", 0.92);
-      // 90°/270° swap the page box so the sheet fills A4 the right way round.
-      const upright = rotation % 180 === 0 ? cropped : { width: cropped.height, height: cropped.width };
-      const fit = fitA4(upright.width, upright.height);
+      /*
+       * `cropped` is already rotated (review bakes the rotation into a new
+       * bitmap so the layout box matches what is on screen), so the page keeps
+       * rotation 0: its width/height are the real, upright dimensions, and a
+       * non-zero meta rotation would make paintBase draw it sideways again.
+       */
+      const fit = fitA4(cropped.width, cropped.height);
       const page: PageMeta = {
         id: uid("pg"),
         source: { kind: "image", dataUrl, mime: "image/jpeg" },
         wPt: fit.wPt,
         hPt: fit.hPt,
-        rotation: (((rotation % 360) + 360) % 360) as PageMeta["rotation"],
+        rotation: 0,
         ocrState: "idle",
       };
       store.setPages((prev) => [...prev, page]);
@@ -254,6 +262,19 @@ export default function ScannerModal() {
     if (!files?.length) return;
     void shell.importFiles(Array.from(files));
     shell.close();
+  };
+
+  /**
+   * Turn the scanned page by a quarter turn.
+   *
+   * The bitmap itself is rotated — CSS rotation leaves the layout box alone, so
+   * a 90° turn used to overflow and clip the page. The dial keeps counting so
+   * the user can see which way up they are.
+   */
+  const turn = (delta: number) => {
+    if (!cropped) return;
+    setCropped(rotateCanvas(cropped, delta));
+    setRotation((r) => (r + delta) % 360);
   };
 
   const cycleFilter = () => {
@@ -496,12 +517,12 @@ export default function ScannerModal() {
               <div className="flex items-center gap-1 rounded-lg border border-line2 bg-panel2 p-1">
                 <IconButton
                   label={rotation ? `Rotate left (currently ${rotation}°)` : "Rotate left"}
-                  onClick={() => setRotation((r) => (r + 270) % 360)}
+                  onClick={() => turn(270)}
                 >
                   <RotateCcw size={16} />
                 </IconButton>
                 <span className="min-w-[38px] text-center text-[11.5px] tabular-nums text-muted">{rotation}°</span>
-                <IconButton label="Rotate right" onClick={() => setRotation((r) => (r + 90) % 360)}>
+                <IconButton label="Rotate right" onClick={() => turn(90)}>
                   <RotateCw size={16} />
                 </IconButton>
               </div>
