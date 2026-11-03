@@ -13,6 +13,9 @@ import { FONT_CSS } from "./pdfedit";
 import { loadImage, blobToDataUrl } from "./pdfjs";
 import { pdfStore } from "./pdfStore";
 
+import { paperAround, glyphInset, glyphMetrics, inkAround } from "./ink";
+import { coverWord, coverWithPaper, drawFittedText, fontWeight } from "./patch";
+
 export const ptToPx = (pt: number, dpi: number) => (pt * dpi) / 72;
 
 export function pagePixelSize(meta: PageMeta, dpi: number) {
@@ -50,14 +53,21 @@ export async function paintBase(canvas: HTMLCanvasElement, meta: PageMeta) {
     ctx.restore();
   }
 
-  // erase replaced OCR text right in the pixels
+  /*
+   * Cover replaced/erased words with the page's own paper.
+   *
+   * This used to fill a hard white box with 10% padding. On a camera scan the
+   * paper is not white, so the erase was always visible as a bright rectangle;
+   * and because the box includes the ascender/descender overshoot that OCR
+   * reports, it also erased a band of clean paper the old word never touched.
+   */
   const erased = meta.ocr?.words?.filter(isErasedWord) ?? [];
   if (erased.length) {
     const k = W / wPt;
-    ctx.fillStyle = "#ffffff";
     for (const word of erased) {
-      const pad = Math.max(1, word.h * 0.1);
-      ctx.fillRect((word.x - pad) * k, (word.y - pad) * k, (word.w + pad * 2) * k, (word.h + pad * 2) * k);
+      const inset = glyphInset(canvas, word, k);
+      const paper = paperAround(canvas, word, k);
+      coverWord(ctx, word, inset, { k, paper, ink: paper });
     }
   }
   void hPt;
@@ -68,14 +78,29 @@ export async function paintAnnotations(
   ctx: CanvasRenderingContext2D,
   annotations: Annotation[],
   k: number,
-  excludeIds?: Set<string>
+  excludeIds?: Set<string>,
+  /** the painted page, sampled for paper/ink when an edit must blend in */
+  base?: HTMLCanvasElement
 ) {
   for (const ann of annotations) {
     if (excludeIds?.has(ann.id)) continue;
     switch (ann.type) {
       case "redact":
-        ctx.fillStyle = ann.color || "#ffffff";
-        ctx.fillRect(ann.rect.x * k, ann.rect.y * k, ann.rect.w * k, ann.rect.h * k);
+        if (ann.color && ann.color !== "#ffffff") {
+          ctx.fillStyle = ann.color;
+          ctx.fillRect(ann.rect.x * k, ann.rect.y * k, ann.rect.w * k, ann.rect.h * k);
+        } else if (base) {
+          // "Redact" in white means "cover it" — cover it with this page's
+          // paper so the patch disappears instead of glowing.
+          coverWithPaper(ctx, ann.rect, {
+            k,
+            paper: paperAround(base, ann.rect, k),
+            ink: { r: 17, g: 17, b: 17 },
+          });
+        } else {
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(ann.rect.x * k, ann.rect.y * k, ann.rect.w * k, ann.rect.h * k);
+        }
         break;
       case "draw":
         drawStroke(ctx, ann, k);
@@ -93,7 +118,36 @@ export async function paintAnnotations(
         break;
       }
       case "text":
-        drawText(ctx, ann, k);
+        if (base) {
+          /*
+           * A text annotation is painted the same way a replaced word is:
+           * cover its footprint with the surrounding paper, then draw ink that
+           * matches the page. Without this, typed text sits on a white card
+           * over grey paper.
+           */
+          const paper = paperAround(base, ann.rect, k);
+          const ink = inkAround(base, ann.rect, k);
+          /*
+           * Measure the glyphs BEFORE covering them — once the patch is down
+           * the height they occupied is gone, and that measurement is what sets
+           * the size and baseline of what replaces them.
+           */
+          const glyph = glyphMetrics(base, ann.rect, k);
+          coverWithPaper(ctx, ann.rect, { k, paper, ink });
+          drawFittedText(ctx, ann.text, ann.rect, {
+            k,
+            paper,
+            ink,
+            fontSizePt: ann.fontSize || 12,
+            fontCss: FONT_CSS[ann.fontKey] ?? FONT_CSS.helvetica,
+            weight: fontWeight(ann.fontKey),
+            align: ann.align,
+            glyphHPt: glyph?.h,
+            baselinePt: glyph?.bottom,
+          });
+        } else {
+          drawText(ctx, ann, k);
+        }
         break;
     }
   }
@@ -190,7 +244,7 @@ export async function renderFlattenedPage(meta: PageMeta, opts: RenderPageOption
   await paintBase(canvas, meta);
   const ctx = canvas.getContext("2d")!;
   const k = w / displaySize(meta).w;
-  await paintAnnotations(ctx, opts.annotations, k, new Set(opts.excludeIds ?? []));
+  await paintAnnotations(ctx, opts.annotations, k, new Set(opts.excludeIds ?? []), canvas);
   return { canvas, width: w, height: h, k };
 }
 

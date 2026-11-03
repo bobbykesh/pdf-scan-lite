@@ -8,8 +8,9 @@ import { Button, Field, Modal, Segmented, Slider } from "./ui";
 import { exportPdf } from "@/lib/pdfedit";
 import { pdfStore } from "@/lib/pdfStore";
 import { pdfToImagesZip } from "@/lib/compress";
+import { pageToExportImage } from "@/lib/stamp";
 import { downloadBlob, downloadOrShare, safeFileName } from "@/lib/share";
-import { formatBytes } from "@/lib/utils";
+import { displaySize, formatBytes } from "@/lib/utils";
 import { PDFDocument } from "pdf-lib";
 
 type Target = "pdf" | "images" | "text";
@@ -50,7 +51,21 @@ export default function ExportModal() {
     setWorking("Building PDF…");
     try {
       const items = pages.map((p) => ({ meta: p, annotations: store.annotations[p.id] ?? [] }));
-      const built = await exportPdf(items, pdfStore.refs(), { flattenOcr, flattenAnnotations });
+      const built = await exportPdf(items, pdfStore.refs(), { flattenOcr, flattenAnnotations }, async (meta) => {
+        /*
+         * Edited pages are burned to an image, so rasterise at the export DPI
+         * with every annotation painted in — this is what makes a replaced
+         * word part of the scan instead of a text object on top of it.
+         */
+        const { dataUrl } = await pageToExportImage(meta, {
+          dpi,
+          annotations: store.annotations[meta.id] ?? [],
+          quality: quality / 100,
+          format: "jpeg",
+        });
+        const { w, h } = displaySize(meta);
+        return { dataUrl, wPt: w, hPt: h };
+      });
       let bytes = built.bytes;
       if (built.skippedPages > 0) {
         shell.toast(`${built.skippedPages} page(s) could not be copied and were skipped`, "info");

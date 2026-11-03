@@ -79,7 +79,7 @@ export function PDFCanvas({
         const { w: wPt } = displaySize(meta);
         const k = (widthPx / wPt) * dpr;
         const hide = new Set(excludeIds ?? []);
-        await paintAnnotations(ctx, annotations, k, hide);
+        await paintAnnotations(ctx, annotations, k, hide, canvas);
         if (cancelled) return;
       } catch {
         /* ignore */

@@ -31,7 +31,7 @@ export default function WordEditModal() {
       open={open}
       onClose={() => shell.close()}
       title="Edit recognised text"
-      subtitle="The original pixels are erased and replaced by a real PDF text box"
+      subtitle="The word is painted out and rewritten in the page's own ink — no white box left behind"
       width="max-w-md"
       footer={
         <div className="flex items-center justify-between gap-2">
@@ -90,8 +90,8 @@ export default function WordEditModal() {
         <div className="flex items-start gap-2 rounded-lg bg-warn/10 px-2.5 py-2 text-[11px] leading-relaxed text-warn">
           <Eraser size={13} className="mt-0.5 shrink-0" />
           <span>
-            Replacement is pixel-destructive: the original word is painted out before the new text is written, so the old text can
-            never be copied from the exported PDF. {replaced} word(s) already replaced on this page.
+            The original word is destroyed, not covered: it is painted out with the paper colour sampled around it, so the old text
+            cannot be copied from the export and the patch does not show. {replaced} word(s) already edited on this page.
           </span>
         </div>
         <p className="flex items-center gap-1 text-[10.5px] text-dim">

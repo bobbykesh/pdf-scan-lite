@@ -73,13 +73,44 @@ export interface BuiltPdf {
   pageCount: number;
   ocrPages: number;
   bakedAnnotations: number;
+  /** pages re-rendered as edited bitmaps (replaced/erased words, text edits) */
+  burnedPages: number;
   skippedPages: number;
+}
+
+/**
+ * Renders a page exactly as the editor shows it, at whatever resolution the
+ * exporter asks for. Supplied by the caller so this module does not have to
+ * import the renderer (which imports this one for its font map).
+ */
+export type PageRasteriser = (meta: PageMeta) => Promise<{
+  dataUrl: string;
+  wPt: number;
+  hPt: number;
+}>;
+
+/**
+ * Which pages must be burned to an image.
+ *
+ * Replaced words and erased words are painted INTO the pixels rather than
+ * covered with a rectangle: a hard white box over grey paper is the sticker
+ * look, and a live PDF text object is editable text sitting on top of the old
+ * glyphs instead of replacing them.
+ *
+ * Note this deliberately does not consult `flattenAnnotations`: content the
+ * user burned into the page is no longer an editable annotation, so the
+ * "flatten annotations" setting has nothing to say about it.
+ */
+function pageNeedsBurn(meta: PageMeta, annotations: Annotation[]): boolean {
+  if (meta.ocr?.words?.some((w) => w.conf === -1)) return true;
+  return annotations.some((a) => a.type === "text" || a.type === "redact");
 }
 
 export async function exportPdf(
   pages: ExportPage[],
   sources: PdfSourceRef[],
-  opts: ExportOptions
+  opts: ExportOptions,
+  rasterise?: PageRasteriser
 ): Promise<BuiltPdf> {
   const out = await PDFDocument.create();
   const fonts = new Map<FontKey, PDFFont>();
@@ -114,11 +145,31 @@ export async function exportPdf(
 
   const bakeAll = opts.flattenAnnotations;
   let baked = 0;
+  let burned = 0;
   let ocrPages = 0;
   let skipped = 0;
 
   for (const { meta, annotations } of pages) {
     let page: PDFPage;
+
+    /*
+     * Burn-in: when this page carries content that was painted into it, the
+     * exported page is that painted bitmap. The OCR text layer and any
+     * remaining live annotations are then drawn on as usual, so text stays
+     * searchable while the visible page is the edited one.
+     */
+    if (rasterise && pageNeedsBurn(meta, annotations)) {
+      const shot = await rasterise(meta);
+      const img = await getImage(shot.dataUrl);
+      page = out.addPage([shot.wPt, shot.hPt]);
+      page.drawImage(img, { x: 0, y: 0, width: shot.wPt, height: shot.hPt });
+      burned++;
+      if (opts.flattenOcr && meta.ocr?.words?.length) {
+        await drawOcrLayer(page, meta, shot.wPt, shot.hPt);
+        ocrPages++;
+      }
+      continue;
+    }
 
     if (meta.source.kind === "pdf") {
       const src = srcDocs.get(meta.source.docId);
@@ -183,7 +234,7 @@ export async function exportPdf(
   out.setCreator("PDF Scan Lite — client-side scanner & editor");
   out.setCreationDate(new Date());
   const bytes = await out.save({ useObjectStreams: true, addDefaultPage: false });
-  return { bytes, pageCount: out.getPageCount(), ocrPages, bakedAnnotations: baked, skippedPages: skipped };
+  return { bytes, pageCount: out.getPageCount(), ocrPages, bakedAnnotations: baked, burnedPages: burned, skippedPages: skipped };
 }
 
 async function drawText(

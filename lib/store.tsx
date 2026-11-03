@@ -275,23 +275,36 @@ export function StoreProvider({ children }: { children: ReactNode }) {
           return { ...p, ocr: { ...p.ocr, words } };
         })
       );
+      /*
+       * The replacement occupies the word it replaces.
+       *
+       * The old box was `max(word.w + 24, len * h * 0.62 + 16)` — a guess that
+       * was usually wider than the original word, so the new text stuck out
+       * past where the old text ended. It also sat 18% higher and 45% taller
+       * than the glyphs, and used a fixed near-black Helvetica regardless of
+       * what the page actually looked like. Now the box is the word's own
+       * box and the renderer fits the text to it, sampling the page for ink
+       * colour (see lib/patch.ts).
+       */
       const ann: Annotation = {
         id: uid("an"),
         pageId,
         type: "text",
         rect: {
-          x: Math.max(0, word.x - 3),
-          y: Math.max(0, word.y - word.h * 0.18),
-          w: Math.max(word.w + 24, replacement.length * word.h * 0.62 + 16),
-          h: word.h * 1.45,
+          x: Math.max(0, word.x - 0.5),
+          y: word.y,
+          w: word.w + 1,
+          h: word.h,
         },
         text: replacement,
-        fontSize: Math.max(6, word.h * 0.95),
+        // A starting point only — the renderer sizes to the glyphs it measures
+        // and shrinks further if the replacement is longer than the original.
+        fontSize: Math.max(4, word.h),
         fontKey: "helvetica",
         color: "#111111",
         align: "left",
         opacity: 1,
-        lineHeight: 1.2,
+        lineHeight: 1.15,
       };
       setAnnotationsRaw((prev) => ({ ...prev, [pageId]: [...(prev[pageId] ?? []), ann] }));
       setDirty(true);
