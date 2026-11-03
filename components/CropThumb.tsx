@@ -28,10 +28,12 @@ export default function CropThumb({
   quad: [Point, Point, Point, Point];
   source: HTMLCanvasElement | null;
   visible: boolean;
-  side: { left: number; top: number };
+  side: { left: number | string; top: number | string };
 }) {
   const ref = useRef<HTMLCanvasElement | null>(null);
   const work = useRef<{ canvas: HTMLCanvasElement; w: number; h: number } | null>(null);
+  /** working-copy px per capture px */
+  const workScale = useRef(1);
   const frame = useRef(0);
   const lastKey = useRef("");
 
@@ -46,6 +48,8 @@ export default function CropThumb({
     ctx.imageSmoothingQuality = "high";
     ctx.drawImage(source, 0, 0, c.width, c.height);
     work.current = { canvas: c, w: source.width, h: source.height };
+    workScale.current = c.width / Math.max(1, source.width);
+    lastKey.current = ""; // force a redraw for the new source
   }, [source]);
 
   useEffect(() => {
@@ -61,8 +65,15 @@ export default function CropThumb({
 
     if (frame.current) cancelAnimationFrame(frame.current);
     frame.current = requestAnimationFrame(() => {
-      // Quad is in source pixels; the working copy is scaled, so scale it down.
-      const k = w.canvas.width / w.w;
+      /*
+       * The quad is expressed in capture pixels, so the working copy has to be
+       * mapped from the capture's size — not from its own. Using the working
+       * canvas's own width here was fine only while the two happened to be the
+       * same size; on a filtered or differently-sized copy it warps the wrong
+       * region and the card shows a cropped corner of the page.
+       */
+      void w;
+      const k = workScale.current;
       const small = quad.map((p) => ({ x: p.x * k, y: p.y * k })) as [
         Point,
         Point,
@@ -91,6 +102,7 @@ export default function CropThumb({
       style={{
         left: side.left,
         top: side.top,
+        maxWidth: "42vw",
         opacity: visible ? 1 : 0,
         transition: "opacity 140ms ease-out",
       }}

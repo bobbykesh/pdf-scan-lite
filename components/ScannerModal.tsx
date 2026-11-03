@@ -157,17 +157,28 @@ export default function ScannerModal() {
     [raw, filter]
   );
   /**
-   * The loupe magnifies 3x, so it cannot be fed the 1100px preview: at that
-   * size a 150px ring would be showing about 50 source pixels, which is mush,
+   * The loupe magnifies 3.5x, so it cannot be fed the 1100px preview: at that
+   * size the ring would be showing a handful of source pixels, which is mush,
    * and you would align the crop to JPEG artefacts instead of the page edge.
    *
-   * A working copy at ~2.4 MP is sharp enough for a 3x loupe on a phone and
-   * costs ~10 MB instead of the ~36 MB a full 12 MP capture would hold.
+   * It must also carry the SAME scan filter the export will apply. Sampling
+   * the raw capture meant the loupe and the result card showed Colour while
+   * the page came out Vivid — previews that disagree with the output are worse
+   * than no preview.
+   *
+   * A working copy at ~1600px is sharp enough at that magnification and costs
+   * a few MB instead of the ~36 MB a full 12 MP capture would hold.
    */
-  const loupeSource = useMemo(
-    () => (raw ? downscaleCopy(raw, 1600) : null),
-    [raw]
-  );
+  const loupeSource = useMemo(() => {
+    if (!raw) return null;
+    /*
+     * Same aspect as the capture, always: the quad is expressed in capture
+     * pixels, so the working copy must be a plain scale of it. `downscaleCopy`
+     * preserves aspect, and filtering never resizes, so this holds.
+     */
+    const small = downscaleCopy(raw, 1600);
+    return applyScanFilterToCopy(small, filter);
+  }, [raw, filter]);
   const reviewPreview = useMemo(() => {
     if (!cropped) return "";
     /*

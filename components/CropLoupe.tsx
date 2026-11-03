@@ -34,15 +34,21 @@ const LOUPE_ZOOM = 3.5;
 export default function CropLoupe({
   state,
   source,
-  /** css px per source px, i.e. how the photo is currently displayed */
-  displayScale,
-  /** offset of the photo inside the crop frame */
+  /** offset of the photo inside the crop frame, in css px */
   origin,
+  /** how many css px the whole capture spans on screen */
+  frameWidth,
+  /** width of the capture in the units the crop quad is expressed in */
+  captureWidth,
+  /** source px per capture px (the working copy is a scaled capture) */
+  sourceScale,
 }: {
   state: LoupeState;
   source: HTMLCanvasElement | null;
-  displayScale: number;
   origin: { x: number; y: number };
+  frameWidth: number;
+  captureWidth: number;
+  sourceScale: number;
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
 
@@ -64,12 +70,38 @@ export default function CropLoupe({
      * on top of that, so one CSS px of the loupe covers 1/(displayScale*zoom)
      * source px.
      */
-    const srcPerCss = 1 / Math.max(1e-6, displayScale * zoom);
-    const side = size * srcPerCss; // source px visible across the loupe
+    /*
+     * One coordinate story, no preview in it.
+     *
+     * The quad and the capture width are the same units, so work there:
+     *   frame css → capture px  (× captureWidth / frameWidth)
+     *   capture px → source px  (× sourceScale)
+     * Earlier versions mixed the css-per-preview-px scale with a working copy
+     * of a different size, which pointed the loupe at the wrong part of the
+     * image — often past its edge, hence the black circle.
+     */
+    const cssPerCapture = Math.max(1e-6, frameWidth) / Math.max(1, captureWidth);
+    const capturePerLoupe = 1 / (cssPerCapture * zoom); // capture px per loupe px
+    const side = size * capturePerLoupe * sourceScale; // source px shown
 
-    // Finger position in source pixels.
-    const sx = (state.x - origin.x) * (1 / Math.max(1e-6, displayScale));
-    const sy = (state.y - origin.y) * (1 / Math.max(1e-6, displayScale));
+    const capX = (state.x - origin.x) / cssPerCapture;
+    const capY = (state.y - origin.y) / cssPerCapture;
+
+    /*
+     * Keep the finger point dead centre — do NOT clamp the window to the image.
+     *
+     * Clamping pinned the window inside the photo, which shifted the sampled
+     * area away from the point under the finger exactly when it mattered (at a
+     * page corner, where you are placing the crop). And any part of the window
+     * outside the photo was left transparent, so the ring went black and looked
+     * broken.
+     *
+     * Instead the window is allowed to overhang, and the overhang is filled
+     * with a neutral paper tone: you still see the page edge crossing the ring,
+     * which is the whole point of the loupe.
+     */
+    const sx = capX * sourceScale - side / 2;
+    const sy = capY * sourceScale - side / 2;
 
     ctx.save();
     ctx.clearRect(0, 0, size, size);
@@ -79,25 +111,15 @@ export default function CropLoupe({
     ctx.arc(r, r, r - 1, 0, Math.PI * 2);
     ctx.clip();
 
-    ctx.fillStyle = "#ffffff";
+    ctx.fillStyle = "#d8d8d8"; // neutral: reads as "outside the photo", never black
     ctx.fillRect(0, 0, size, size);
 
     ctx.imageSmoothingEnabled = true;
     ctx.imageSmoothingQuality = "high";
-    ctx.drawImage(
-      source,
-      sx - side / 2,
-      sy - side / 2,
-      side,
-      side,
-      0,
-      0,
-      size,
-      size
-    );
+    ctx.drawImage(source, sx, sy, side, side, 0, 0, size, size);
 
     ctx.restore();
-  }, [state.x, state.y, state.opacity, source, displayScale, origin.x, origin.y]);
+  }, [state.x, state.y, state.opacity, source, frameWidth, captureWidth, sourceScale, origin.x, origin.y]);
 
   return (
     <div

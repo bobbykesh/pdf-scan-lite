@@ -328,8 +328,17 @@ export default function CropStage({
 
   const edges = useMemo(() => edgePoints(corners), [corners]);
 
-  /** css px per source px, as currently displayed */
-  const displayScale = fit.w / Math.max(1, width);
+  /**
+   * The loupe samples a working copy whose pixel dimensions differ from the
+   * capture's. The quad and `width` are expressed in *capture* pixels, so the
+   * conversion has to go capture → working copy, not the reverse.
+   *
+   * Getting this direction wrong (or letting a preview-sized working copy drift
+   * from the capture's size) sends the loupe to the wrong part of the image —
+   * it ends up sampling off the edge of the photo and rendering black.
+   */
+  const sourceScale = source && width > 0 ? Math.min(1, source.width / width) : 1;
+  const isDegenerate = !source || source.width < 8 || source.height < 8;
 
   /*
    * Where the loupe goes: offset from the finger so it is never under it and
@@ -364,13 +373,18 @@ export default function CropStage({
    * The result card sits opposite the loupe, so the two never overlap: the
    * loupe is there to place a corner, the card to judge the whole crop.
    */
-  const THUMB_BOX = { w: 116, h: 104 };
+  /*
+   * The card is anchored to the *shell*, not the frame: the frame fills the
+   * shell, so there is no room outside it, and parking the card over the frame
+   * put it on top of a corner handle. It now sits in the shell's corner on the
+   * opposite side to the loupe, clear of every handle.
+   */
   const thumbSide = touch
     ? {
-        left: loupe && loupe.cx < box.w / 2 ? Math.max(6, box.w - THUMB_BOX.w - 6) : 6,
-        top: loupe && loupe.cy < box.h / 2 ? Math.max(6, box.h - THUMB_BOX.h - 6) : 6,
+        left: loupe && loupe.cx < box.w / 2 ? box.w - 124 : 4,
+        top: loupe && loupe.cy < box.h / 2 ? box.h - 116 : 4,
       }
-    : { left: 6, top: 6 };
+    : { left: 4, top: 4 };
 
   return (
     <div ref={shellRef} className="relative flex h-full w-full items-center justify-center">
@@ -529,20 +543,14 @@ export default function CropStage({
           );
         })}
 
-        {/* Live straightened result, for judging the crop as a whole. */}
-        <CropThumb
-          quad={corners}
-          source={source ?? null}
-          visible={!!touch && loupeFade > 0}
-          side={thumbSide}
-        />
-
         {/* The magnifier that follows the finger. */}
-        {loupe ? (
+        {loupe && !isDegenerate ? (
           <CropLoupe
             state={loupe}
             source={source ?? null}
-            displayScale={displayScale}
+            frameWidth={fit.w}
+            captureWidth={width}
+            sourceScale={sourceScale}
             origin={{ x: fit.x, y: fit.y }}
           />
         ) : null}
@@ -555,6 +563,20 @@ export default function CropStage({
           </div>
         ) : null}
       </div>
+
+      {/*
+       * The live result card lives OUTSIDE the crop frame.
+       *
+       * Inside it, the card sat on top of a corner handle — the very grips you
+       * need while dragging — and swallowed touches meant for them. The area
+       * around the 4:3 frame is empty, so it goes there.
+       */}
+      <CropThumb
+        quad={corners}
+        source={source ?? null}
+        visible={!!touch && loupeFade > 0 && !busy}
+        side={thumbSide}
+      />
     </div>
   );
 }
