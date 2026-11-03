@@ -22,6 +22,37 @@ import { useEffect } from "react";
  *
  * Result: a deployed update arrives on the next visit, and no reload loops.
  */
+/**
+ * Swap in a downloaded-but-waiting build and reload into it.
+ *
+ * The update prompt used to say "tap to refresh" over a toast that had nothing
+ * to tap, so the only way to actually take an update was to clear site data.
+ * This asks the waiting worker to activate now, then reloads once it is in
+ * control; if that never happens (no waiting worker, or a browser that ignores
+ * the message) it reloads anyway after a beat, which still picks up the new
+ * build because navigations are network-first.
+ */
+export function applyServiceWorkerUpdate() {
+  const finish = () => window.location.reload();
+  if (!("serviceWorker" in navigator)) return finish();
+
+  let done = false;
+  const once = () => {
+    if (done) return;
+    done = true;
+    finish();
+  };
+
+  navigator.serviceWorker.addEventListener("controllerchange", once, { once: true });
+  navigator.serviceWorker.getRegistration().then((reg) => {
+    if (reg?.waiting) reg.waiting.postMessage({ type: "SKIP_WAITING" });
+    else once();
+  }).catch(once);
+
+  // Never leave the user stuck on a prompt that did nothing.
+  setTimeout(once, 1500);
+}
+
 export default function ServiceWorker() {
   useEffect(() => {
     if (!("serviceWorker" in navigator)) return;
@@ -67,6 +98,13 @@ export default function ServiceWorker() {
         reg.addEventListener("updatefound", () => announce(reg.installing));
 
         // Check for a new build on load, and again when the tab is refocused.
+        /*
+         * Ask the browser whether /sw.js changed. `update()` alone re-checks on
+         * its own schedule, which can be hours out, and a user who opens the
+         * installed app right after a deploy should be offered the update then.
+         * updateViaCache:"none" above plus a no-store fetch keeps the HTTP cache
+         * from hiding the new bytes.
+         */
         void reg.update().catch(() => {});
         const onVisible = () => {
           if (document.visibilityState === "visible") void reg.update().catch(() => {});

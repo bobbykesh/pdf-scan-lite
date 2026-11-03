@@ -1,4 +1,20 @@
 import type { NextConfig } from "next";
+import { execFileSync } from "node:child_process";
+
+/*
+ * Stamp the service worker's cache version for this build.
+ *
+ * Doing it here rather than from an npm lifecycle script means it runs no
+ * matter how the build is started (`next build`, `npm run build`, CI). The
+ * cache name has to change per deploy: a fixed name gives `activate` nothing
+ * to evict, so every build's chunks accumulate in one cache and a returning
+ * visitor can be served assets from a build that no longer exists.
+ */
+try {
+  execFileSync(process.execPath, ["scripts/stamp-sw.mjs"], { stdio: "inherit" });
+} catch {
+  console.warn("[stamp-sw] skipped");
+}
 
 const nextConfig: NextConfig = {
   reactStrictMode: true,

@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "prebuild": "node scripts/copy-vendor-assets.mjs",
+    "prebuild": "node scripts/copy-vendor-assets.mjs && node scripts/stamp-sw.mjs",
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",

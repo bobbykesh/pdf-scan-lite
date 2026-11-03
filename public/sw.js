@@ -105,6 +105,14 @@ self.addEventListener("activate", (event) => {
 });
 
 self.addEventListener("message", (event) => {
+  // The page asks to take a waiting build immediately ("Refresh" on the update
+  // prompt). Install already calls skipWaiting, so this is the belt-and-braces
+  // path for a worker that was left waiting by an older install.
+  if (event.data?.type === "SKIP_WAITING") {
+    void self.skipWaiting();
+    return;
+  }
+
   // Let the page ask "how much is actually cached?" for the offline badge.
   const isStatus = event.data === "cache-status" || event.data?.type === "cache-status";
   if (!isStatus) return;
@@ -150,6 +158,32 @@ self.addEventListener("fetch", (event) => {
           // Offline: serve the last known document, then the precached shell.
           return (await caches.match(req)) || (await caches.match("/")) || Response.error();
         })
+    );
+    return;
+  }
+
+  /* Never serve the worker itself from a cache: a browser cannot see a new
+   * deploy through a stale worker. */
+  if (url.pathname === "/sw.js") {
+    event.respondWith(fetch(req, { cache: "no-store" }).catch(() => caches.match(req)));
+    return;
+  }
+
+  /* The build manifest is how a new worker learns which assets this deploy
+   * needs, and it is rewritten every build. Serving it cache-first gave the
+   * new worker the *previous* build's list, so it re-created the old cache and
+   * the update looked successful while the stale chunks stayed in use. */
+  if (url.pathname === MANIFEST_URL) {
+    event.respondWith(
+      fetch(req, { cache: "no-store" })
+        .then((res) => {
+          if (res.ok) {
+            const copy = res.clone();
+            caches.open(CACHE).then((c) => c.put(req, copy)).catch(() => {});
+          }
+          return res;
+        })
+        .catch(async () => (await caches.match(req)) || Response.error())
     );
     return;
   }

@@ -18,6 +18,7 @@ import CompressModal from "./CompressModal";
 import SignatureModal from "./SignatureModal";
 import WordEditModal from "./WordEditModal";
 import Welcome from "./Welcome";
+import { applyServiceWorkerUpdate } from "./ServiceWorker";
 import { AlertTriangle, CheckCircle2, Info, X } from "lucide-react";
 import type { OcrWord } from "@/types";
 
@@ -27,6 +28,9 @@ interface Toast {
   id: string;
   kind: "ok" | "err" | "info";
   text: string;
+  /** Optional label for a primary button in the toast (e.g. "Refresh"). */
+  action?: string;
+  onAction?: () => void;
 }
 
 export interface ShellApi {
@@ -58,13 +62,24 @@ function Workspace() {
   const [editingWord, setEditingWord] = useState<{ word: OcrWord; pageId: string } | null>(null);
   const thumbsQueued = useRef(new Set<string>());
 
-  const toast = useCallback((text: string, kind: Toast["kind"] = "ok") => {
-    const id = uid("t");
-    // Only ever show one message: stacking two banners over the document
-    // hides the top of the page on phones, and the older line is stale anyway.
-    setToasts([{ id, kind, text }]);
-    setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4200);
-  }, []);
+  const toast = useCallback(
+    (
+      text: string,
+      kind: Toast["kind"] = "ok",
+      action?: { label: string; onAction: () => void }
+    ) => {
+      const id = uid("t");
+      // Only ever show one message: stacking two banners over the document
+      // hides the top of the page on phones, and the older line is stale anyway.
+      setToasts([{ id, kind, text, action: action?.label, onAction: action?.onAction }]);
+      // A toast with a button is the only way to take an update, so it stays
+      // until the user acts on it (or dismisses it) instead of vanishing.
+      if (!action) {
+        setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 4200);
+      }
+    },
+    []
+  );
 
   // The service worker announces when the offline cache is complete.
   useEffect(() => {
@@ -73,7 +88,10 @@ function Workspace() {
     // A new build downloaded itself and is waiting: offer a one-tap refresh
     // instead of reloading underneath the user (never interrupt mid-scan).
     const onUpdate = () => {
-      toast("A new version is ready — tap to refresh.", "ok");
+      toast("A new version is ready.", "info", {
+        label: "Refresh",
+        onAction: () => applyServiceWorkerUpdate(),
+      });
     };
     window.addEventListener("pdfsl:offline-ready", onReady);
     window.addEventListener("pdfsl:update-ready", onUpdate);
@@ -81,8 +99,7 @@ function Workspace() {
       window.removeEventListener("pdfsl:offline-ready", onReady);
       window.removeEventListener("pdfsl:update-ready", onUpdate);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [toast]);
   const open = useCallback((m: ModalKind, p?: unknown) => {
     setPayload(p ?? null);
     setModal(m);
@@ -266,6 +283,17 @@ function Workspace() {
                 <Info size={16} className="mt-0.5 shrink-0 text-accent" />
               )}
               <span className="flex-1 leading-snug text-ink/90">{t.text}</span>
+              {t.action ? (
+                <button
+                  onClick={() => {
+                    setToasts((prev) => prev.filter((x) => x.id !== t.id));
+                    t.onAction?.();
+                  }}
+                  className="shrink-0 rounded-lg bg-accent px-2.5 py-1 text-[12px] font-medium text-white"
+                >
+                  {t.action}
+                </button>
+              ) : null}
               <button
                 onClick={() => setToasts((prev) => prev.filter((x) => x.id !== t.id))}
                 className="text-dim hover:text-ink"
