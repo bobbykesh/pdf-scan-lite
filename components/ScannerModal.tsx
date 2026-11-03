@@ -22,6 +22,7 @@ import {
   applyScanFilterToCopy,
   captureFrame,
   detectDocumentCornersDetailed,
+  downscaleCopy,
   filteredPreviewUrl,
   rotateCanvas,
   frameHasContent,
@@ -154,6 +155,18 @@ export default function ScannerModal() {
   const cropPreview = useMemo(
     () => (raw ? filteredPreviewUrl(raw, filter, 1100, 0.86) : ""),
     [raw, filter]
+  );
+  /**
+   * The loupe magnifies 3x, so it cannot be fed the 1100px preview: at that
+   * size a 150px ring would be showing about 50 source pixels, which is mush,
+   * and you would align the crop to JPEG artefacts instead of the page edge.
+   *
+   * A working copy at ~2.4 MP is sharp enough for a 3x loupe on a phone and
+   * costs ~10 MB instead of the ~36 MB a full 12 MP capture would hold.
+   */
+  const loupeSource = useMemo(
+    () => (raw ? downscaleCopy(raw, 1600) : null),
+    [raw]
   );
   const reviewPreview = useMemo(() => {
     if (!cropped) return "";
@@ -440,6 +453,7 @@ export default function ScannerModal() {
             <div className="min-h-0 flex-1">
               <CropStage
                 preview={cropPreview}
+                source={loupeSource}
                 width={raw.width}
                 height={raw.height}
                 corners={corners ?? FULL_QUAD(raw.width, raw.height)}

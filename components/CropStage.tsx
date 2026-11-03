@@ -1,8 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Move, RotateCcw, Wand2 } from "lucide-react";
 import type { Point } from "@/types";
+import CropLoupe, { LOUPE_SIZE, type LoupeState } from "./CropLoupe";
+import CropThumb from "./CropThumb";
 
 /** TL, TR, BR, BL */
 export type Quad = [Point, Point, Point, Point];
@@ -54,6 +56,75 @@ function clampCorner(quad: Quad, index: number, next: Point, w: number, h: numbe
   return out;
 }
 
+/** Edge midpoints, in the same TL,TR,BR,BL order as the corners. */
+export type EdgeIndex = 0 | 1 | 2 | 3; // top, right, bottom, left
+
+/**
+ * Slide one edge, leaving the opposite edge exactly where it is.
+ *
+ * The edge is moved by translating its two endpoints along the axis it faces —
+ * a horizontal edge only moves in y, a vertical edge only in x. This keeps the
+ * quad convex without needing the general corner constraints: the opposite
+ * edge is untouched, and the two moving corners cannot cross it because the
+ * movement is clamped to stay on their side of it.
+ *
+ * A quadrilateral whose opposite sides are parallel stays a parallelogram, and
+ * that is exactly what a perspective crop of a page is — so dragging an edge
+ * does not fight the warp later.
+ */
+function clampEdge(
+  quad: Quad,
+  edge: EdgeIndex,
+  next: Point,
+  w: number,
+  h: number,
+  /** where the pointer started, in image space — only the facing axis is used */
+  start: Point
+): Quad {
+  const out = [...quad] as Quad;
+  const [tl, tr, br, bl] = out;
+  const MIN = 8; // never let an edge collapse past the opposite one
+
+  switch (edge) {
+    case 0: {
+      // top edge: move TL and TR together, in y only
+      const y = clamp(next.y, 0, Math.min(br.y, bl.y) - MIN);
+      out[0] = { x: tl.x, y };
+      out[1] = { x: tr.x, y };
+      break;
+    }
+    case 1: {
+      // right edge: TR and BR, in x only
+      const x = clamp(next.x, Math.max(tl.x, bl.x) + MIN, w);
+      out[1] = { x, y: tr.y };
+      out[2] = { x, y: br.y };
+      break;
+    }
+    case 2: {
+      // bottom edge: BR and BL, in y only
+      const y = clamp(next.y, Math.max(tl.y, tr.y) + MIN, h);
+      out[2] = { x: br.x, y };
+      out[3] = { x: bl.x, y };
+      break;
+    }
+    default: {
+      // left edge: TL and BL, in x only
+      const x = clamp(next.x, 0, Math.min(tr.x, br.x) - MIN);
+      out[0] = { x, y: tl.y };
+      out[3] = { x, y: bl.y };
+      break;
+    }
+  }
+  void start;
+  return out;
+}
+
+/** Midpoint of each edge, in TL,TR,BR,BL order. */
+export function edgePoints(q: Quad): [Point, Point, Point, Point] {
+  const mid = (a: Point, b: Point) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
+  return [mid(q[0], q[1]), mid(q[1], q[2]), mid(q[3], q[2]), mid(q[0], q[3])];
+}
+
 export default function CropStage({
   /** object URL / data URL of the capture (already filtered for display) */
   preview,
@@ -65,10 +136,13 @@ export default function CropStage({
   onAutoCrop,
   onReset,
   busy,
+  /** full-resolution (or working-copy) capture; the loupe must not use the preview */
+  source,
 }: {
   preview: string;
   width: number;
   height: number;
+  source?: HTMLCanvasElement | null;
   corners: Quad;
   setCorners: (q: Quad) => void;
   onAutoCrop: () => void;
@@ -79,7 +153,38 @@ export default function CropStage({
   const [box, setBox] = useState({ w: 0, h: 0 });
   /** Where the image actually sits inside the 4:3 frame (letterboxed). */
   const [fit, setFit] = useState({ x: 0, y: 0, w: 0, h: 0 });
-  const drag = useRef<{ index: number | "move"; start: Point; origin: Quad } | null>(null);
+  const drag = useRef<{
+    index: number | "move" | `edge:${EdgeIndex}`;
+    start: Point;
+    origin: Quad;
+  } | null>(null);
+
+  /* --------------- loupe + live thumbnail (follows the finger, not the handle) */
+  const [touch, setTouch] = useState<{ x: number; y: number } | null>(null);
+  const [loupeFade, setLoupeFade] = useState(0);
+  const fadeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showTouch = useCallback((x: number, y: number) => {
+    if (fadeTimer.current) {
+      clearTimeout(fadeTimer.current);
+      fadeTimer.current = null;
+    }
+    setTouch({ x, y });
+    setLoupeFade(1);
+  }, []);
+
+  const hideTouchSoon = useCallback(() => {
+    if (fadeTimer.current) clearTimeout(fadeTimer.current);
+    // a beat after release, so the result of the drag is still visible
+    fadeTimer.current = setTimeout(() => setLoupeFade(0), 400);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (fadeTimer.current) clearTimeout(fadeTimer.current);
+    },
+    []
+  );
   const raf = useRef(0);
   const pending = useRef<Quad | null>(null);
 
@@ -153,19 +258,34 @@ export default function CropStage({
     []
   );
 
-  const begin = (index: number | "move") => (e: React.PointerEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
-    drag.current = { index, start: toImage(e.clientX, e.clientY), origin: corners };
-    if (navigator.vibrate) navigator.vibrate(8);
-  };
+  /** Pointer position relative to the crop frame, for placing the loupe. */
+  const toFrame = useCallback((clientX: number, clientY: number) => {
+    const el = shellRef.current;
+    if (!el) return { x: 0, y: 0 };
+    const rect = el.getBoundingClientRect();
+    const left = rect.left + (rect.width - box.w) / 2;
+    const top = rect.top + (rect.height - box.h) / 2;
+    return { x: clientX - left, y: clientY - top };
+  }, [box.h, box.w]);
+
+  const begin =
+    (index: number | "move" | `edge:${EdgeIndex}`) => (e: React.PointerEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      (e.currentTarget as HTMLElement).setPointerCapture(e.pointerId);
+      drag.current = { index, start: toImage(e.clientX, e.clientY), origin: corners };
+      const f = toFrame(e.clientX, e.clientY);
+      showTouch(f.x, f.y); // the loupe appears on touch, not on movement
+      if (navigator.vibrate) navigator.vibrate(8);
+    };
 
   const move = (e: React.PointerEvent) => {
     const d = drag.current;
     if (!d) return;
     e.preventDefault();
     const p = toImage(e.clientX, e.clientY);
+    const f = toFrame(e.clientX, e.clientY);
+    showTouch(f.x, f.y);
 
     if (d.index === "move") {
       // Translate the whole quad, clamped so no corner leaves the image.
@@ -179,13 +299,22 @@ export default function CropStage({
       return;
     }
 
-    schedule(clampCorner(d.origin, d.index, p, width, height));
+    if (typeof d.index === "string" && d.index.startsWith("edge:")) {
+      const edge = Number(d.index.slice(5)) as EdgeIndex;
+      schedule(clampEdge(d.origin, edge, p, width, height, d.start));
+      return;
+    }
+
+    if (typeof d.index === "number") {
+      schedule(clampCorner(d.origin, d.index, p, width, height));
+    }
   };
 
   const end = (e: React.PointerEvent) => {
     if (!drag.current) return;
     drag.current = null;
     pending.current = null;
+    hideTouchSoon();
     try {
       (e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId);
     } catch {
@@ -196,6 +325,52 @@ export default function CropStage({
   /* --------------------------------------------------------------- render */
   const px = (v: number, total: number) => `${(v / total) * 100}%`;
   const centre = centroid(corners);
+
+  const edges = useMemo(() => edgePoints(corners), [corners]);
+
+  /** css px per source px, as currently displayed */
+  const displayScale = fit.w / Math.max(1, width);
+
+  /*
+   * Where the loupe goes: offset from the finger so it is never under it and
+   * never covers the point being placed. It flips to the other side near the
+   * frame edges, so it can never be half off-screen.
+   */
+  const loupe: LoupeState | null = touch
+    ? (() => {
+        const gap = 22;
+        const half = LOUPE_SIZE / 2;
+        const margin = 2;
+        // Prefer right/below the finger, flip when there is no room, then
+        // clamp so the ring can never be clipped by the frame.
+        const rightFits = touch.x + gap + LOUPE_SIZE < box.w - margin;
+        const leftFits = touch.x - gap - LOUPE_SIZE > margin;
+        const downFits = touch.y + gap + LOUPE_SIZE < box.h - margin;
+        const upFits = touch.y - gap - LOUPE_SIZE > margin;
+
+        let cx = rightFits ? touch.x + gap + half : touch.x - gap - half;
+        if (!rightFits && !leftFits) cx = box.w - half - margin;
+        cx = Math.min(box.w - half - margin, Math.max(half + margin, cx));
+
+        let cy = downFits ? touch.y + gap + half : touch.y - gap - half;
+        if (!downFits && !upFits) cy = box.h - half - margin;
+        cy = Math.min(box.h - half - margin, Math.max(half + margin, cy));
+
+        return { x: touch.x, y: touch.y, cx, cy, opacity: loupeFade };
+      })()
+    : null;
+
+  /*
+   * The result card sits opposite the loupe, so the two never overlap: the
+   * loupe is there to place a corner, the card to judge the whole crop.
+   */
+  const THUMB_BOX = { w: 116, h: 104 };
+  const thumbSide = touch
+    ? {
+        left: loupe && loupe.cx < box.w / 2 ? Math.max(6, box.w - THUMB_BOX.w - 6) : 6,
+        top: loupe && loupe.cy < box.h / 2 ? Math.max(6, box.h - THUMB_BOX.h - 6) : 6,
+      }
+    : { left: 6, top: 6 };
 
   return (
     <div ref={shellRef} className="relative flex h-full w-full items-center justify-center">
@@ -322,6 +497,55 @@ export default function CropStage({
         >
           <Move size={18} />
         </div>
+
+        {/* Edge handles: slim pills on each side, draggable on their own. */}
+        {edges.map((mid, i) => {
+          const horizontal = i === 0 || i === 2; // top/bottom move in y
+          return (
+            <div
+              key={`edge-${i}`}
+              role="slider"
+              tabIndex={0}
+              aria-label={["Top edge", "Right edge", "Bottom edge", "Left edge"][i]}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(((horizontal ? mid.y / height : mid.x / width) * 100))}
+              onPointerDown={begin(`edge:${i}` as `edge:${EdgeIndex}`)}
+              onPointerMove={move}
+              onPointerUp={end}
+              onPointerCancel={end}
+              className={`absolute z-20 grid touch-none place-items-center ${
+                horizontal ? "h-11 w-12 cursor-ns-resize" : "h-12 w-11 cursor-ew-resize"
+              } -translate-x-1/2 -translate-y-1/2`}
+              style={{ left: fit.x + (mid.x / width) * fit.w, top: fit.y + (mid.y / height) * fit.h }}
+            >
+              {/* visible pill: 34x10 (or rotated), the familiar house shape */}
+              <span
+                className={`rounded-full border-[3px] border-white bg-accent shadow-[0_2px_10px_rgba(0,0,0,0.55)] transition-transform duration-100 ease-out active:scale-110 ${
+                  horizontal ? "h-2 w-10" : "h-10 w-2"
+                }`}
+              />
+            </div>
+          );
+        })}
+
+        {/* Live straightened result, for judging the crop as a whole. */}
+        <CropThumb
+          quad={corners}
+          source={source ?? null}
+          visible={!!touch && loupeFade > 0}
+          side={thumbSide}
+        />
+
+        {/* The magnifier that follows the finger. */}
+        {loupe ? (
+          <CropLoupe
+            state={loupe}
+            source={source ?? null}
+            displayScale={displayScale}
+            origin={{ x: fit.x, y: fit.y }}
+          />
+        ) : null}
 
         {busy ? (
           <div className="absolute inset-0 z-30 grid place-items-center bg-black/55 backdrop-blur-[2px]">
